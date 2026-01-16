@@ -1,3 +1,11 @@
+# TEAM 52
+
+"""
+Uday Singh  ( 202351150 )
+Sakasham Singh  ( 202351124 )
+Hudad Harsh Ajaybhai (  202351048 )
+"""
+
 """
 Image Encoder–Decoder with Spatial Sampling and Intensity Quantization
 
@@ -9,9 +17,6 @@ based on:
 The encoded image is stored in a custom binary format consisting of:
 - A 4-bit header (2 bits for spatial resolution, 2 bits for intensity resolution)
 - Raw quantized pixel data
-
-All processing steps are implemented manually without using high-level
-image processing libraries.
 """
 
 import sys
@@ -133,10 +138,7 @@ def make_header(spatial_idx, intensity_idx):
 
 
 def encode_image(img, spatial_idx, intensity_idx, filename):
-    """
-    Encodes an image using spatial sampling and intensity quantization
-    and writes it to a binary file.
-    """
+
     size = _SPATIAL_RESOLUTION_DIMENSIONS_[spatial_idx]
     bits = RESOLUTION_INTENSITY_SELECTION[intensity_idx]
 
@@ -159,10 +161,8 @@ def encode_image(img, spatial_idx, intensity_idx, filename):
 # DECODER
 # --------------------------------------------------------------------
 def decode_image(filename):
-    """
-    Decodes an image from the custom binary format.
-"""
     with open(filename, "rb") as f:
+
         header = f.read(1)[0]
 
         spatial_idx = (header >> 2) & 0b11
@@ -219,3 +219,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
