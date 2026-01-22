@@ -51,73 +51,67 @@ Index:
 # --------------------------------------------------------------------
 # IMAGE INPUT AND PREPROCESSING
 # --------------------------------------------------------------------
-def read_grayscale_image(path):
-    """
-    Reads an image from disk and converts it to grayscale.
-    """
-    image = plt.imread(path)
+#READS IMAGE AND CONVERTS IT TO GRAYSCALE IMAGE
+def read_grayscale_image(filepath):
 
-    if image.ndim == 3:
-        r = image[:, :, 0]
-        g = image[:, :, 1]
-        b = image[:, :, 2]
-        gray = 0.299 * r + 0.587 * g + 0.114 * b
+    image = plt.imread(filepath)
+    if image.ndim==3:
+        r=image[:,:,0]
+        g=image[:,:,1]
+        b=image[:,:,2]
+
+        gray = (0.299 * r+ 0.587 * g + 0.114 * b)
     else:
         gray = image
-
     if gray.max() <= 1.0:
         gray = gray * 255.0
 
     return gray.astype(np.uint8)
 
-
+#CROPS CENTRAL SQUARE REGION OF IMAGE
 def center_crop(image):
-    """
-    Crops the central square region of an image.
-    """
-    h, w = image.shape
-    side = min(h, w)
-    y0 = (h - side) // 2
-    x0 = (w - side) // 2
-    return image[y0:y0 + side, x0:x0 + side]
+    h,w=image.shape
 
+    side =min(h,w)
+    y=(h-side)//2
+    x=(w-side)//2
+
+    return image[y:y+side,x:x+side]
 
 # --------------------------------------------------------------------
 # SPATIAL SAMPLING
 # --------------------------------------------------------------------
-def spatial_sample(image, out_size):
-    """
-    Performs spatial sampling using nearest-neighbor interpolation.
 
-    """
-    in_h, in_w = image.shape
-    sampled = np.zeros((out_size, out_size), dtype=np.uint8)
+# performs spatial sampling using nearest neighbour interpolation
+def spatial_sample(image,output_size):
 
-    for i in range(out_size):
-        for j in range(out_size):
-            src_i = int(i * in_h / out_size)
-            src_j = int(j * in_w / out_size)
-            sampled[i, j] = image[src_i, src_j]
+    input_height, input_width = image.shape
+
+    sampled=np.zeros((output_size, output_size), dtype=np.uint8)
+
+    for i in range(output_size):
+        for j in range(output_size):
+            source_i = int(i * input_width / output_size)
+            source_j = int(j * input_height / output_size)
+            sampled[i, j] = image[source_i, source_j]
 
     return sampled
-
-
 # --------------------------------------------------------------------
 # INTENSITY QUANTIZATION
 # --------------------------------------------------------------------
+# Applies uniform intensity quantization
 def quantize(image, bits):
-    """
-    Applies uniform intensity quantization.
-
-    """
     levels = 2 ** bits
     quantized = np.zeros_like(image, dtype=np.uint8)
 
     for i in range(image.shape[0]):
         for j in range(image.shape[1]):
-            normalized = image[i, j] / 255.0
-            q = round(normalized * (levels - 1))
-            quantized[i, j] = int(q * (255 / (levels - 1)))
+
+            normalized=image[i, j]/255.0
+
+            q=round(normalized*(levels-1))
+
+            quantized[i, j]=int(q * (255/(levels-1)))
 
     return quantized
 
@@ -125,56 +119,32 @@ def quantize(image, bits):
 # --------------------------------------------------------------------
 # ENCODING UTILITIES
 # --------------------------------------------------------------------
-def make_header(spatial_idx, intensity_idx):
-    """
-    Creates a 4-bit header encoding spatial and intensity resolution.
 
-    Header Format
-    -------------
-    [ spatial index (2 bits) | intensity index (2 bits) ]
-
-    """
-    return (spatial_idx << 2) | intensity_idx
-
+#creates a 4-bit custom header with format [spatial index | intesnsity index]
+def make_header(spatial_index,intesity_index):
+    return(spatial_index<<2)|intesity_index
 
 def encode_image(img, spatial_idx, intensity_idx, filename):
-
-    size = _SPATIAL_RESOLUTION_DIMENSIONS_[spatial_idx]
-    bits = RESOLUTION_INTENSITY_SELECTION[intensity_idx]
-
     img = center_crop(img)
-    img = spatial_sample(img, size)
-    img = quantize(img, bits)
+    img = spatial_sample(img, _SPATIAL_RESOLUTION_DIMENSIONS_[spatial_idx])
+    img = quantize(img, RESOLUTION_INTENSITY_SELECTION[intensity_idx])
 
-    header = make_header(spatial_idx, intensity_idx)
+    header = (spatial_idx << 2) | intensity_idx
 
     with open(filename, "wb") as f:
         f.write(bytes([header]))
         f.write(img.tobytes())
 
-    print("[ENCODER]")
-    print(" Spatial Resolution:", size, "x", size)
-    print(" Intensity Resolution:", bits, "bits")
 
-
-# --------------------------------------------------------------------
-# DECODER
-# --------------------------------------------------------------------
 def decode_image(filename):
     with open(filename, "rb") as f:
-
         header = f.read(1)[0]
+        size = _SPATIAL_RESOLUTION_DIMENSIONS_[(header >> 2) & 3]
+        data = f.read()
 
-        spatial_idx = (header >> 2) & 0b11
-        intensity_idx = header & 0b11
+    image = np.frombuffer(data, dtype=np.uint8).reshape((size, size))
+    return image
 
-        size = _SPATIAL_RESOLUTION_DIMENSIONS_[spatial_idx]
-        img_data = f.read()
-
-    image = np.frombuffer(img_data, dtype=np.uint8)
-    image = image.reshape((size, size))
-
-    return image, spatial_idx, intensity_idx
 
 
 # --------------------------------------------------------------------
@@ -185,39 +155,45 @@ def main():
         print("Usage: python image_encoder_decoder.py <input_image>")
         return
 
+    # Read input image
     img = read_grayscale_image(sys.argv[1])
 
-    print("\nSelect Spatial Resolution:")
-    print(" 0 → 100×100")
-    print(" 1 → 200×200")
-    print(" 2 → 400×400")
-    print(" 3 → 800×800")
-    spatial_idx = int(input("Enter choice (0–3): "))
+    spatial_idx = int(input(
+        "Select Spatial Resolution (0:100, 1:200, 2:400, 3:800): "
+    ))
 
-    print("\nSelect Intensity Resolution:")
-    print(" 0 → 1 bit")
-    print(" 1 → 2 bits")
-    print(" 2 → 4 bits")
-    print(" 3 → 8 bits")
-    intensity_idx = int(input("Enter choice (0–3): "))
+    intensity_idx = int(input(
+        "Select Intensity Resolution (0:1bit, 1:2bit, 2:4bit, 3:8bit): "
+    ))
 
     filename = "encoded_image.bin"
 
+    # Encode and decode
     encode_image(img, spatial_idx, intensity_idx, filename)
+    decoded = decode_image(filename)
 
-    decoded, s_idx, i_idx = decode_image(filename)
+    # -------------------------------------------------
+    # VISUALIZATION (Matplotlib ONLY)
+    # -------------------------------------------------
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
 
-    plt.imshow(decoded, cmap="gray")
-    plt.title(
+    axes[0].imshow(center_crop(img), cmap="gray")
+    axes[0].set_title("Original (Cropped)")
+    axes[0].axis("off")
+
+    axes[1].imshow(decoded, cmap="gray")
+    axes[1].set_title(
         f"Decoded Image\n"
-        f"{_SPATIAL_RESOLUTION_DIMENSIONS_[s_idx]}×{_SPATIAL_RESOLUTION_DIMENSIONS_[s_idx]}, "
-        f"{RESOLUTION_INTENSITY_SELECTION[i_idx]} bits"
+        f"{_SPATIAL_RESOLUTION_DIMENSIONS_[spatial_idx]}×"
+        f"{_SPATIAL_RESOLUTION_DIMENSIONS_[spatial_idx]}, "
+        f"{RESOLUTION_INTENSITY_SELECTION[intensity_idx]} bits"
     )
-    plt.axis("off")
+    axes[1].axis("off")
+
+    plt.tight_layout()
     plt.show()
 
 
 if __name__ == "__main__":
     main()
-
 
