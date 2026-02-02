@@ -1,3 +1,63 @@
+"""
+Affine Image Transformer (BMP – 24 bit)
+
+Purpose
+-------
+Command-line tool for applying 2D affine transformations to
+24-bit uncompressed BMP images without external image libraries.
+
+Supported Transformations
+--------------------------
+- Scaling (horizontal, vertical)
+- Rotation (about origin, about image center)
+- Translation
+- Shearing
+
+Sampling Modes
+--------------
+- Nearest Neighbor
+- Bilinear Interpolation (default)
+
+Implementation Notes
+--------------------
+- Uses 3x3 homogeneous matrices for affine transforms
+- Transformations are accumulated, then applied in a single pass
+- Inverse mapping is used to avoid holes
+- Output image size is computed automatically via transformed bounds
+- BMP parsing and writing is done manually (no PIL, no OpenCV)
+
+Input / Output
+--------------
+- Input  : 24-bit uncompressed BMP
+- Output : 24-bit uncompressed BMP
+
+CLI Commands
+------------
+scale           -> scale image (sx sy)
+rotate          -> rotate about origin
+rotate_center   -> rotate about image center
+translate       -> translate image (tx ty)
+shear           -> shear image (shx shy)
+mode            -> sampling mode (nearest / bilinear)
+apply           -> apply accumulated transforms
+save            -> save output BMP
+reset           -> reload original image
+help            -> show commands
+exit            -> quit
+
+Constraints
+-----------
+- No external image processing libraries
+- Python standard library only
+
+Team 52
+-------
+Uday Singh (202351150)
+Sakasham Singh (202351124)
+Hudad Harsh Ajaybhai (202351048)
+"""
+
+
 import math
 import os
 import struct
