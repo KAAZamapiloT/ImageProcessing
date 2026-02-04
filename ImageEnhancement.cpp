@@ -334,6 +334,219 @@ class GammaTransformEvent{
       std::cout << "Different pixels: " << diffCount << "\n";
   }
 };
+
+
+class PieceWiseContrastEvent{
+    public:
+    std::string name="PieceWise";
+    std::string m_InputPath;
+    std::string m_OutputPath;
+    PieceWiseContrastEvent(const std::string& in,
+                              const std::string& out,
+                              uint16_t r1, uint16_t s1,
+                              uint16_t r2, uint16_t s2)
+            : m_InputPath(in), m_OutputPath(out),
+              r1(r1), s1(s1), r2(r2), s2(s2) {}
+
+    void execute() {
+        ImageObject img(m_InputPath);
+        contrast(img);
+        img.saveTIFF8bit(m_OutputPath);
+    }
+
+    private:
+
+    uint16_t r1, s1, r2, s2;
+
+    std::vector<uint16_t> buildLUT(uint32_t L) {
+        const double maxVal = static_cast<double>(L - 1);
+
+        if (r1 == 0 || r2 <= r1 || r2 >= maxVal)
+            throw std::runtime_error("Invalid contrast parameters");
+
+        if (s1 > maxVal || s2 > maxVal)
+            throw std::runtime_error("Output levels exceed bit depth");
+
+        std::vector<uint16_t> lut(L);
+
+        for (uint32_t r = 0; r < L; r++) {
+            double s;
+
+            if (r <= r1) {
+                s = (s1 / static_cast<double>(r1)) * r;
+            }
+            else if (r <= r2) {
+                s = ((s2 - s1) / static_cast<double>(r2 - r1)) * (r - r1) + s1;
+            }
+            else {
+                s = ((maxVal - s2) / (maxVal - r2)) * (r - r2) + s2;
+            }
+
+            lut[r] = static_cast<uint16_t>(
+                std::lround(std::clamp(s, 0.0, maxVal))
+            );
+        }
+
+        return lut;
+    }
+
+        void contrast(ImageObject& img) {
+            const uint32_t L = img.levels();
+            auto lut = buildLUT(L);
+
+            uint32_t h = img.height();
+            uint32_t w = img.width();
+
+            for (uint32_t y = 0; y < h; y++) {
+                for (uint32_t x = 0; x < w; x++) {
+                    img[y][x] = lut[img[y][x]];
+                }
+            }
+        }
+
+};
+
+// Applying intensity ramp
+class IntensityRampEvent {
+public:
+    IntensityRampEvent(const std::string& in,
+                       const std::string& out,
+                       uint16_t start,
+                       uint16_t end)
+        : m_InputPath(in),
+          m_OutputPath(out),
+          m_Start(start),
+          m_End(end) {}
+
+    std::string name = "ramp";
+
+    void execute() {
+        ImageObject img(m_InputPath);
+        applyRamp(img);
+        img.saveTIFF(m_OutputPath);
+    }
+
+private:
+    std::string m_InputPath, m_OutputPath;
+    uint16_t m_Start, m_End;
+
+    std::vector<uint16_t> buildRampLUT(uint32_t L,
+                                       uint16_t r1,
+                                       uint16_t r2)
+    {
+        if (r2 <= r1)
+            throw std::runtime_error("Invalid ramp range");
+
+        const double maxVal = static_cast<double>(L - 1);
+        const double slope  = maxVal / (r2 - r1);
+
+        std::vector<uint16_t> lut(L);
+
+        for (uint32_t r = 0; r < L; r++) {
+            double s;
+            if (r < r1)
+                s = 0.0;
+            else if (r > r2)
+                s = maxVal;
+            else
+                s = slope * (r - r1);
+            lut[r] = static_cast<uint16_t>(
+                std::lround(std::clamp(s, 0.0, maxVal))
+            );
+        }
+        return lut;
+    }
+
+    void applyRamp(ImageObject& img) {
+        auto lut = buildRampLUT(img.levels(), m_Start, m_End);
+        uint32_t h = img.height();
+        uint32_t w = img.width();
+
+        for (uint32_t y = 0; y < h; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                img[y][x] = lut[img[y][x]];
+            }
+        }
+    }
+};
+
+class IntensityLevelSlicingEvent {
+public:
+
+enum class Mode {
+    WITHOUT_BACKGROUND,
+    WITH_BACKGROUND
+};
+    IntensityLevelSlicingEvent(const std::string& in,
+                               const std::string& out,
+                               uint16_t r1,
+                               uint16_t r2,
+                               uint16_t k,
+                               std::string mode)
+        : m_InputPath(in),
+          m_OutputPath(out),
+          m_R1(r1),
+          m_R2(r2),
+          m_K(k){
+
+              if(mode=="bg"){
+                  m_Mode = Mode::WITH_BACKGROUND;
+              }else{
+                  m_Mode = Mode::WITHOUT_BACKGROUND;
+              }
+          }
+
+    std::string name = "slice";
+
+    void execute() {
+        ImageObject img(m_InputPath);
+        applySlicing(img);
+        img.saveTIFF(m_OutputPath);
+    }
+
+private:
+    std::string m_InputPath, m_OutputPath;
+    uint16_t m_R1, m_R2;
+    uint16_t m_K;
+    Mode m_Mode;
+
+    std::vector<uint16_t> buildLUT(uint32_t L) {
+        const double maxVal = static_cast<double>(L-1);
+        if (m_R2 < m_R1){
+            throw std::runtime_error("Invalid slicing range");
+        }
+        if (m_K > maxVal){
+            throw std::runtime_error("Slice value exceeds bit depth");
+        }
+        std::vector<uint16_t> lut(L);
+
+        for (uint32_t r = 0; r < L; r++) {
+            if (r >= m_R1 && r <= m_R2) {
+                lut[r] = m_K;
+            } else {
+                if (m_Mode == Mode::WITH_BACKGROUND)
+                    lut[r] = static_cast<uint16_t>(r);
+                else
+                    lut[r] = 0;
+            }
+        }
+
+        return lut;
+    }
+
+    void applySlicing(ImageObject& img) {
+        auto lut = buildLUT(img.levels());
+        uint32_t h = img.height();
+        uint32_t w = img.width();
+        for (uint32_t y = 0; y < h; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                img[y][x] = lut[img[y][x]];
+            }
+        }
+    }
+};
+
+
 class InputHandler {
 public:
     static void run() {
@@ -344,6 +557,9 @@ public:
             std::cout << "invert <input> <output>\n";
             std::cout<<"log <input> <output>\n";
             std::cout<<"gamma <input> <output> <gamma_value>\n";
+            std::cout<<"contrast <input> <output> <r1> <s1> <r2> <s2>\n";
+            std::cout<<"ramp <input> <output> <start> <end> \n";
+            std::cout<<"slice <input> <output> <start> <end> <mode>(bg,nobg)\n";
             std::cout << "quit\n> ";
 
             std::cin >> cmd;
@@ -365,6 +581,24 @@ public:
                 std::cin>>in>>out>>gamma;
                 GammaTransformEvent(in,out,gamma).execute();
                 std::cout<<"Gamma transformation done.\n";
+            }else if(cmd=="Contrast"){
+                std::string in,out;
+                uint16_t r1,s1,r2,s2;
+                std::cin>>in>>out>>r1>>s1>>r2>>s2;
+                PieceWiseContrastEvent(in,out,r1,s1,r2,s2).execute();
+                std::cout<<"Contrast transformation done.\n";
+            }else if(cmd=="ramp"){
+                std::string in,out;
+                uint16_t start,end;
+                std::cin>>in>>out>>start>>end;
+                IntensityRampEvent(in,out,start,end).execute();
+                std::cout<<"Intensity_Ramp transformation done.\n";
+            }else if(cmd=="slice"){
+                std::string in,out;
+                std::string mode;
+                uint16_t start,end,slice;
+                std::cin>>in>>out>>start>>end>>slice>>mode;
+                IntensityLevelSlicingEvent(in,out,start,end,slice,mode).execute();
             }
             else if (cmd == "quit") {
                 break;
@@ -376,7 +610,6 @@ public:
 
 
 int main() {
-    std::cout << TIFFGetVersion() << std::endl;
     InputHandler handler;
     handler.run();
 return 0;
