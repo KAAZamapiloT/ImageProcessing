@@ -1,3 +1,4 @@
+import copy
 import math
 from enum import Enum
 
@@ -367,3 +368,845 @@ class LocalHistogramEnhancementEvent:
                 out[y, x] = int(round(mapped))
 
         img.data = out
+
+
+class BoxSmoothingEvent:
+    def __init__(self, inp: str, out: str, kernel: int):
+        if kernel < 3 or kernel % 2 == 0:
+            raise RuntimeError("Kernel size must be odd and >= 3")
+
+        self.m_InputPath = inp
+        self.m_OutputPath = out
+        self.m_Kernel = kernel
+
+    def execute(self):
+        img = ImageObject(self.m_InputPath)
+        self._smooth(img)
+        img.save_tiff_8bit(self.m_OutputPath)
+
+    def _smooth(self, img):
+        W = img.width
+        H = img.height
+        r = self.m_Kernel // 2
+
+        out = [[0] * W for _ in range(H)]
+
+        for y in range(H):
+            for x in range(W):
+                s = 0
+                count = 0
+
+                for dy in range(-r, r + 1):
+                    for dx in range(-r, r + 1):
+                        yy = min(max(y + dy, 0), H - 1)
+                        xx = min(max(x + dx, 0), W - 1)
+                        s += img.data[yy][xx]
+                        count += 1
+
+                out[y][x] = s // count  # integer average
+
+        # write back
+        for y in range(H):
+            for x in range(W):
+                img.data[y][x] = out[y][x]
+
+
+class GaussianLowPassEvent:
+    def __init__(self, inp: str, out: str, kernel_size: int, sigma: float):
+        if kernel_size < 3 or kernel_size % 2 == 0:
+            raise RuntimeError("Gaussian kernel size must be odd and >= 3")
+        if sigma <= 0.0:
+            raise RuntimeError("Sigma must be > 0")
+
+        self.m_InputPath = inp
+        self.m_OutputPath = out
+        self.m_KernelSize = kernel_size
+        self.m_Sigma = sigma
+
+    def execute(self):
+        img = ImageObject(self.m_InputPath)
+        self._apply_gaussian(img)
+        img.save_tiff_8bit(self.m_OutputPath)
+
+    def _build_gaussian_kernel_1d(self):
+        r = self.m_KernelSize // 2
+        kernel = [0.0] * self.m_KernelSize
+        s = 0.0
+
+        for i in range(-r, r + 1):
+            v = math.exp(-(i * i) / (2.0 * self.m_Sigma * self.m_Sigma))
+            kernel[i + r] = v
+            s += v
+
+        # normalize
+        for i in range(self.m_KernelSize):
+            kernel[i] /= s
+
+        return kernel
+
+    def _apply_gaussian(self, img):
+        W = img.width
+        H = img.height
+        L = img.levels
+        r = self.m_KernelSize // 2
+
+        kernel = self._build_gaussian_kernel_1d()
+
+        # ---- horizontal pass ----
+        temp = [[0] * W for _ in range(H)]
+
+        for y in range(H):
+            for x in range(W):
+                acc = 0.0
+                for k in range(-r, r + 1):
+                    xx = min(max(x + k, 0), W - 1)
+                    acc += kernel[k + r] * img.data[y][xx]
+
+                temp[y][x] = int(min(max(acc, 0.0), L - 1))
+
+        # ---- vertical pass ----
+        for y in range(H):
+            for x in range(W):
+                acc = 0.0
+                for k in range(-r, r + 1):
+                    yy = min(max(y + k, 0), H - 1)
+                    acc += kernel[k + r] * temp[yy][x]
+
+                img.data[y][x] = int(min(max(acc, 0.0), L - 1))
+
+
+class HighPassSharpenEvent:
+    def __init__(self, inp: str, out: str, strength: float = 1.0):
+        if strength <= 0.0:
+            raise RuntimeError("Sharpen strength must be > 0")
+
+        self.m_InputPath = inp
+        self.m_OutputPath = out
+        self.m_Strength = strength
+
+    def execute(self):
+        img = ImageObject(self.m_InputPath)
+        self._sharpen(img)
+        img.save_tiff_8bit(self.m_OutputPath)
+
+    def _sharpen(self, img):
+        H = img.height
+        W = img.width
+        L = img.levels
+
+        # 4-connected Laplacian kernel
+        K = [[0, -1, 0], [-1, 4, -1], [0, -1, 0]]
+
+        # high-pass buffer
+        lap = [[0] * W for _ in range(H)]
+
+        # ---- compute Laplacian ----
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                s = 0
+                for ky in range(-1, 2):
+                    for kx in range(-1, 2):
+                        s += K[ky + 1][kx + 1] * img.data[y + ky][x + kx]
+                lap[y][x] = s
+
+        # ---- add scaled high-pass back ----
+        for y in range(H):
+            for x in range(W):
+                sharpened = img.data[y][x] + self.m_Strength * lap[y][x]
+                img.data[y][x] = int(min(max(sharpened, 0.0), L - 1))
+
+
+class UnsharpHighboostEvent:
+    def __init__(self, inp: str, out: str, A: float):
+        if A < 1.0:
+            raise RuntimeError("A must be >= 1.0")
+
+        self.m_InputPath = inp
+        self.m_OutputPath = out
+        self.m_A = A
+
+    def execute(self):
+        img = ImageObject(self.m_InputPath)
+        self._apply(img)
+        img.save_tiff_8bit(self.m_OutputPath)
+
+    def _apply(self, img):
+        H = img.height
+        W = img.width
+        L = img.levels
+
+        # 3x3 Gaussian kernel
+        G = [[1, 2, 1], [2, 4, 2], [1, 2, 1]]
+        Gsum = 16
+
+        blurred = [[0.0] * W for _ in range(H)]
+
+        # ---- Gaussian blur ----
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                acc = 0
+                for ky in range(-1, 2):
+                    for kx in range(-1, 2):
+                        acc += G[ky + 1][kx + 1] * img.data[y + ky][x + kx]
+                blurred[y][x] = acc / Gsum
+
+        # ---- Highboost ----
+        for y in range(H):
+            for x in range(W):
+                original = img.data[y][x]
+                result = self.m_A * original - blurred[y][x]
+
+                img.data[y][x] = int(min(max(result, 0.0), L - 1))
+
+
+class GradientEdgeEnhancementEvent:
+    def __init__(self, inp: str, out: str, k: float):
+        if k <= 0.0:
+            raise RuntimeError("k must be > 0")
+
+        self.m_InputPath = inp
+        self.m_OutputPath = out
+        self.m_K = k
+
+    def execute(self):
+        img = ImageObject(self.m_InputPath)
+        self._enhance(img)
+        img.save_tiff_8bit(self.m_OutputPath)
+
+    def _enhance(self, img):
+        H = img.height
+        W = img.width
+        L = img.levels
+
+        # Sobel kernels
+        Sx = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
+        Sy = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
+
+        out = [[0] * W for _ in range(H)]
+
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                gx = 0
+                gy = 0
+
+                for ky in range(-1, 2):
+                    for kx in range(-1, 2):
+                        p = img.data[y + ky][x + kx]
+                        gx += Sx[ky + 1][kx + 1] * p
+                        gy += Sy[ky + 1][kx + 1] * p
+
+                grad = abs(gx) + abs(gy)
+                enhanced = img.data[y][x] + self.m_K * grad
+
+                out[y][x] = int(min(max(enhanced, 0.0), L - 1))
+
+        # write back
+        for y in range(H):
+            for x in range(W):
+                img.data[y][x] = out[y][x]
+
+
+class LaplacianSobelSharpenEvent:
+    def __init__(self, inp: str, lap_out: str, sharp_out: str, sobel_out: str):
+        self.m_Input = inp
+        self.m_LapOut = lap_out
+        self.m_SharpOut = sharp_out
+        self.m_SobelOut = sobel_out
+
+    def execute(self):
+        img = ImageObject(self.m_Input)
+
+        lap = copy.deepcopy(img)
+        sharp = copy.deepcopy(img)
+        sobel = copy.deepcopy(img)
+
+        self._apply_laplacian(img, lap)
+        self._apply_sharpen(img, lap, sharp)
+        self._apply_sobel(img, sobel)
+
+        lap.save_tiff_8bit(self.m_LapOut)
+        sharp.save_tiff_8bit(self.m_SharpOut)
+        sobel.save_tiff_8bit(self.m_SobelOut)
+
+    def _apply_laplacian(self, inp, out):
+        K = [[0, -1, 0], [-1, 4, -1], [0, -1, 0]]
+
+        H = inp.height
+        W = inp.width
+        L = inp.levels
+
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                s = 0
+                for j in range(-1, 2):
+                    for i in range(-1, 2):
+                        s += K[j + 1][i + 1] * inp.data[y + j][x + i]
+
+                out.data[y][x] = int(min(max(s, 0), L - 1))
+
+    def _apply_sharpen(self, orig, lap, out):
+        H = orig.height
+        W = orig.width
+        L = orig.levels
+
+        for y in range(H):
+            for x in range(W):
+                v = orig.data[y][x] + lap.data[y][x]
+                out.data[y][x] = int(min(max(v, 0), L - 1))
+
+    def _apply_sobel(self, inp, out):
+        Gx = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
+        Gy = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
+
+        H = inp.height
+        W = inp.width
+        L = inp.levels
+
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                sx = 0
+                sy = 0
+
+                for j in range(-1, 2):
+                    for i in range(-1, 2):
+                        p = inp.data[y + j][x + i]
+                        sx += Gx[j + 1][i + 1] * p
+                        sy += Gy[j + 1][i + 1] * p
+
+                mag = abs(sx) + abs(sy)
+                out.data[y][x] = int(min(max(mag, 0), L - 1))
+
+
+class MedianFilterEvent:
+    def __init__(self, inp: str, out: str, window_size: int):
+        if window_size < 3 or window_size % 2 == 0:
+            raise RuntimeError("Median window must be odd and >= 3")
+
+        self.m_InputPath = inp
+        self.m_OutputPath = out
+        self.m_Window = window_size
+
+    def execute(self):
+        img = ImageObject(self.m_InputPath)
+        self._apply(img)
+        img.save_tiff_8bit(self.m_OutputPath)
+
+    def _apply(self, img):
+        W = img.width
+        H = img.height
+        r = self.m_Window // 2
+
+        out = [[0] * W for _ in range(H)]
+
+        for y in range(H):
+            for x in range(W):
+                neighborhood = []
+
+                for dy in range(-r, r + 1):
+                    for dx in range(-r, r + 1):
+                        yy = min(max(y + dy, 0), H - 1)
+                        xx = min(max(x + dx, 0), W - 1)
+                        neighborhood.append(img.data[yy][xx])
+
+                neighborhood.sort()
+                out[y][x] = neighborhood[len(neighborhood) // 2]
+
+        # write back
+        for y in range(H):
+            for x in range(W):
+                img.data[y][x] = out[y][x]
+
+
+class RobertsEdgeEvent:
+    def __init__(self, inp: str, out: str):
+        self.m_InputPath = inp
+        self.m_OutputPath = out
+
+    def execute(self):
+        img = ImageObject(self.m_InputPath)
+        self._apply(img)
+        img.save_tiff_8bit(self.m_OutputPath)
+
+    def _apply(self, img):
+        W = img.width
+        H = img.height
+        L = img.levels
+
+        out = [[0] * W for _ in range(H)]
+
+        for y in range(H - 1):
+            for x in range(W - 1):
+                gx = img.data[y][x] - img.data[y + 1][x + 1]
+                gy = img.data[y][x + 1] - img.data[y + 1][x]
+
+                mag = abs(gx) + abs(gy)
+
+                out[y][x] = int(min(max(mag, 0), L - 1))
+
+        # write back
+        for y in range(H):
+            for x in range(W):
+                img.data[y][x] = out[y][x]
+
+
+class PrewittEdgeEvent:
+    def __init__(self, inp: str, out: str):
+        self.m_InputPath = inp
+        self.m_OutputPath = out
+
+    def execute(self):
+        img = ImageObject(self.m_InputPath)
+        self._apply(img)
+        img.save_tiff_8bit(self.m_OutputPath)
+
+    def _apply(self, img):
+        W = img.width
+        H = img.height
+        L = img.levels
+
+        Gx = [[-1, 0, 1], [-1, 0, 1], [-1, 0, 1]]
+
+        Gy = [[-1, -1, -1], [0, 0, 0], [1, 1, 1]]
+
+        out = [[0] * W for _ in range(H)]
+
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                gx = 0
+                gy = 0
+
+                for ky in range(-1, 2):
+                    for kx in range(-1, 2):
+                        p = img.data[y + ky][x + kx]
+                        gx += Gx[ky + 1][kx + 1] * p
+                        gy += Gy[ky + 1][kx + 1] * p
+
+                mag = abs(gx) + abs(gy)
+
+                out[y][x] = int(min(max(mag, 0), L - 1))
+
+        # write back
+        for y in range(H):
+            for x in range(W):
+                img.data[y][x] = out[y][x]
+
+
+class SobelEdgeEvent:
+    def __init__(self, inp: str, out: str, threshold: int = 0):
+        self.m_InputPath = inp
+        self.m_OutputPath = out
+        self.m_Threshold = threshold  # 0 = no threshold
+
+    def execute(self):
+        img = ImageObject(self.m_InputPath)
+        self._apply(img)
+        img.save_tiff_8bit(self.m_OutputPath)
+
+    def _apply(self, img):
+        W = img.width
+        H = img.height
+        L = img.levels
+
+        Gx = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
+
+        Gy = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
+
+        mag = [[0] * W for _ in range(H)]
+        max_mag = 0
+
+        # ---- compute gradient magnitude ----
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                gx = 0
+                gy = 0
+
+                for ky in range(-1, 2):
+                    for kx in range(-1, 2):
+                        p = img.data[y + ky][x + kx]
+                        gx += Gx[ky + 1][kx + 1] * p
+                        gy += Gy[ky + 1][kx + 1] * p
+
+                g = abs(gx) + abs(gy)
+                mag[y][x] = g
+                if g > max_mag:
+                    max_mag = g
+
+        # ---- normalize + threshold ----
+        for y in range(H):
+            for x in range(W):
+                v = mag[y][x]
+
+                norm = int((v * (L - 1)) / max_mag) if max_mag > 0 else 0
+
+                if self.m_Threshold > 0:
+                    img.data[y][x] = (L - 1) if norm >= self.m_Threshold else 0
+                else:
+                    img.data[y][x] = norm
+
+
+class LaplacianMode(Enum):
+    FOUR = 4
+    EIGHT = 8
+
+
+class LaplacianSharpenEvent:
+    def __init__(self, inp: str, lap_out: str, sharp_out: str, mode: LaplacianMode):
+        self.m_Input = inp
+        self.m_LapOut = lap_out
+        self.m_SharpOut = sharp_out
+        self.m_Mode = mode
+
+    def execute(self):
+        img = ImageObject(self.m_Input)
+
+        lap = copy.deepcopy(img)
+        sharp = copy.deepcopy(img)
+
+        self._apply_laplacian(img, lap)
+        self._apply_sharpen(img, lap, sharp)
+
+        lap.save_tiff_8bit(self.m_LapOut)
+        sharp.save_tiff_8bit(self.m_SharpOut)
+
+    def _apply_laplacian(self, inp, out):
+        K4 = [[0, -1, 0], [-1, 4, -1], [0, -1, 0]]
+
+        K8 = [[-1, -1, -1], [-1, 8, -1], [-1, -1, -1]]
+
+        K = K4 if self.m_Mode == LaplacianMode.FOUR else K8
+
+        H = inp.height
+        W = inp.width
+        L = inp.levels
+
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                s = 0
+                for j in range(-1, 2):
+                    for i in range(-1, 2):
+                        s += K[j + 1][i + 1] * inp.data[y + j][x + i]
+
+                out.data[y][x] = int(min(max(s, 0), L - 1))
+
+    def _apply_sharpen(self, orig, lap, out):
+        H = orig.height
+        W = orig.width
+        L = orig.levels
+
+        for y in range(H):
+            for x in range(W):
+                v = orig.data[y][x] + lap.data[y][x]
+                out.data[y][x] = int(min(max(v, 0), L - 1))
+
+
+class BandMode(Enum):
+    BANDPASS = 1
+    BANDREJECT = 2
+
+
+class BandFilterEvent:
+    def __init__(
+        self, inp: str, out: str, k1: int, s1: float, k2: int, s2: float, mode: BandMode
+    ):
+
+        self.m_Input = inp
+        self.m_Output = out
+        self.m_K1 = k1
+        self.m_S1 = s1
+        self.m_K2 = k2
+        self.m_S2 = s2
+        self.m_Mode = mode
+
+    def execute(self):
+        img = ImageObject(self.m_Input)
+
+        lp1 = copy.deepcopy(img)
+        lp2 = copy.deepcopy(img)
+
+        # reuse GaussianLowPassEvent logic
+        GaussianLowPassEvent("", "", self.m_K1, self.m_S1)._apply_gaussian(lp1)
+        GaussianLowPassEvent("", "", self.m_K2, self.m_S2)._apply_gaussian(lp2)
+
+        self._apply(img, lp1, lp2)
+        img.save_tiff_8bit(self.m_Output)
+
+    def _apply(self, img, lp1, lp2):
+        H = img.height
+        W = img.width
+        L = img.levels
+
+        for y in range(H):
+            for x in range(W):
+                if self.m_Mode == BandMode.BANDPASS:
+                    val = lp2.data[y][x] - lp1.data[y][x]
+                else:  # BANDREJECT
+                    val = lp1.data[y][x] + (img.data[y][x] - lp2.data[y][x])
+
+                img.data[y][x] = int(min(max(val, 0.0), L - 1))
+
+
+class WeightedAveragingEvent:
+    def __init__(self, inp: str, out: str):
+        self.m_InputPath = inp
+        self.m_OutputPath = out
+
+    def execute(self):
+        img = ImageObject(self.m_InputPath)
+        self._apply(img)
+        img.save_tiff_8bit(self.m_OutputPath)
+
+    def _apply(self, img):
+        W = img.width
+        H = img.height
+        L = img.levels
+
+        K = [[1, 2, 1], [2, 4, 2], [1, 2, 1]]
+        Ksum = 16
+
+        out = [[0] * W for _ in range(H)]
+
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                acc = 0
+                for ky in range(-1, 2):
+                    for kx in range(-1, 2):
+                        acc += K[ky + 1][kx + 1] * img.data[y + ky][x + kx]
+
+                out[y][x] = int(min(max(acc // Ksum, 0), L - 1))
+
+        # write back
+        for y in range(H):
+            for x in range(W):
+                img.data[y][x] = out[y][x]
+
+
+class GradientSharpenEvent:
+    def __init__(self, inp: str, out: str, k: float):
+        if k <= 0.0:
+            raise RuntimeError("Sharpen factor k must be > 0")
+
+        self.m_InputPath = inp
+        self.m_OutputPath = out
+        self.m_K = k
+
+    def execute(self):
+        img = ImageObject(self.m_InputPath)
+        self._sharpen(img)
+        img.save_tiff_8bit(self.m_OutputPath)
+
+    def _sharpen(self, img):
+        W = img.width
+        H = img.height
+        L = img.levels
+
+        Gx = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
+        Gy = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
+
+        out = [[0] * W for _ in range(H)]
+
+        for y in range(1, H - 1):
+            for x in range(1, W - 1):
+                sx = 0
+                sy = 0
+
+                for ky in range(-1, 2):
+                    for kx in range(-1, 2):
+                        p = img.data[y + ky][x + kx]
+                        sx += Gx[ky + 1][kx + 1] * p
+                        sy += Gy[ky + 1][kx + 1] * p
+
+                grad_mag = abs(sx) + abs(sy)
+                sharpened = img.data[y][x] + self.m_K * grad_mag
+
+                out[y][x] = int(min(max(sharpened, 0.0), L - 1))
+
+        # write back
+        for y in range(H):
+            for x in range(W):
+                img.data[y][x] = out[y][x]
+
+
+class InputHandler:
+    @staticmethod
+    def run():
+        while True:
+            print("\nCommands:")
+            print("invert <input> <output>")
+            print("log <input> <output>")
+            print("gamma <input> <output> <gamma>")
+            print("contrast <input> <output> <r1> <s1> <r2> <s2>")
+            print("ramp <input> <output> <start> <end>")
+            print("slice <input> <output> <r1> <r2> <k> <bg|nobg>")
+            print("bit_slice <input> <output> <bit> <bg|nobg>")
+            print("hist_eq <input> <output>")
+            print("hist_stats <input>")
+            print("hist_match <src> <ref> <output>")
+            print("local_hist <input> <output> <window>")
+            print("smooth_box <input> <output> <kernel>")
+            print("gaussian <input> <output> <kernel> <sigma>")
+            print("sharpen <input> <output> <strength>")
+            print("unsharp <input> <output> <A>")
+            print("grad_edge <input> <output> <k>")
+            print("lap_sobel <input> <lap_out> <sharp_out> <sobel_out>")
+            print("median <input> <output> <window>")
+            print("roberts <input> <output>")
+            print("prewitt <input> <output>")
+            print("sobel <input> <output> [threshold]")
+            print("laplacian <input> <lap_out> <sharp_out> <4|8>")
+            print("bandpass <input> <output> <k1> <sigma1> <k2> <sigma2>")
+            print("bandreject <input> <output> <k1> <sigma1> <k2> <sigma2>")
+            print("weighted_avg <input> <output>")
+            print("grad_sharpen <input> <output> <k>")
+            print("quit")
+
+            parts = input("> ").strip().split()
+            if not parts:
+                continue
+
+            cmd = parts[0]
+
+            try:
+                if cmd == "invert":
+                    _, inp, out = parts
+                    InvertImageEvent(inp, out).execute()
+
+                elif cmd == "log":
+                    _, inp, out = parts
+                    LogTransformEvent(inp, out).execute()
+
+                elif cmd == "gamma":
+                    _, inp, out, g = parts
+                    GammaTransformEvent(inp, out, float(g)).execute()
+
+                elif cmd == "contrast":
+                    _, inp, out, r1, s1, r2, s2 = parts
+                    PieceWiseContrastEvent(
+                        inp, out, int(r1), int(s1), int(r2), int(s2)
+                    ).execute()
+
+                elif cmd == "ramp":
+                    _, inp, out, start, end = parts
+                    IntensityRampEvent(inp, out, int(start), int(end)).execute()
+
+                elif cmd == "slice":
+                    _, inp, out, r1, r2, k, mode = parts
+                    IntensityLevelSlicingEvent(
+                        inp, out, int(r1), int(r2), int(k), mode
+                    ).execute()
+
+                elif cmd == "bit_slice":
+                    _, inp, out, bit, mode = parts
+                    BitPlaneSliceEvent(inp, out, int(bit), mode).execute()
+
+                elif cmd == "hist_eq":
+                    _, inp, out = parts
+                    HistogramEqualizationEvent(inp, out).execute()
+
+                elif cmd == "hist_stats":
+                    _, inp = parts
+                    HistogramStatsEvent(inp).execute()
+
+                elif cmd == "hist_match":
+                    _, src, ref, out = parts
+                    HistogramMatchingEvent(src, ref, out).execute()
+
+                elif cmd == "local_hist":
+                    _, inp, out, w = parts
+                    LocalHistogramEnhancementEvent(inp, out, int(w)).execute()
+
+                elif cmd == "smooth_box":
+                    _, inp, out, k = parts
+                    BoxSmoothingEvent(inp, out, int(k)).execute()
+
+                elif cmd == "gaussian":
+                    _, inp, out, k, sigma = parts
+                    GaussianLowPassEvent(inp, out, int(k), float(sigma)).execute()
+
+                elif cmd == "sharpen":
+                    _, inp, out, strength = parts
+                    HighPassSharpenEvent(inp, out, float(strength)).execute()
+
+                elif cmd == "unsharp":
+                    _, inp, out, A = parts
+                    UnsharpHighboostEvent(inp, out, float(A)).execute()
+
+                elif cmd == "grad_edge":
+                    _, inp, out, k = parts
+                    GradientEdgeEnhancementEvent(inp, out, float(k)).execute()
+
+                elif cmd == "lap_sobel":
+                    _, inp, lap, sharp, sobel = parts
+                    LaplacianSobelSharpenEvent(inp, lap, sharp, sobel).execute()
+
+                elif cmd == "median":
+                    _, inp, out, w = parts
+                    MedianFilterEvent(inp, out, int(w)).execute()
+
+                elif cmd == "roberts":
+                    _, inp, out = parts
+                    RobertsEdgeEvent(inp, out).execute()
+
+                elif cmd == "prewitt":
+                    _, inp, out = parts
+                    PrewittEdgeEvent(inp, out).execute()
+
+                elif cmd == "sobel":
+                    if len(parts) == 4:
+                        _, inp, out, t = parts
+                        SobelEdgeEvent(inp, out, int(t)).execute()
+                    else:
+                        _, inp, out = parts
+                        SobelEdgeEvent(inp, out).execute()
+
+                elif cmd == "laplacian":
+                    _, inp, lap, sharp, mode = parts
+                    lap_mode = (
+                        LaplacianMode.EIGHT if mode == "8" else LaplacianMode.FOUR
+                    )
+                    LaplacianSharpenEvent(inp, lap, sharp, lap_mode).execute()
+
+                elif cmd == "bandpass":
+                    _, inp, out, k1, s1, k2, s2 = parts
+                    BandFilterEvent(
+                        inp,
+                        out,
+                        int(k1),
+                        float(s1),
+                        int(k2),
+                        float(s2),
+                        BandMode.BANDPASS,
+                    ).execute()
+
+                elif cmd == "bandreject":
+                    _, inp, out, k1, s1, k2, s2 = parts
+                    BandFilterEvent(
+                        inp,
+                        out,
+                        int(k1),
+                        float(s1),
+                        int(k2),
+                        float(s2),
+                        BandMode.BANDREJECT,
+                    ).execute()
+
+                elif cmd == "weighted_avg":
+                    _, inp, out = parts
+                    WeightedAveragingEvent(inp, out).execute()
+
+                elif cmd == "grad_sharpen":
+                    _, inp, out, k = parts
+                    GradientSharpenEvent(inp, out, float(k)).execute()
+
+                elif cmd == "quit":
+                    print("Exiting.")
+                    break
+
+                else:
+                    print("Unknown command")
+
+            except Exception as e:
+                print("Error:", e)
+
+
+if __name__ == "__main__":
+    InputHandler.run()
