@@ -21,7 +21,8 @@ class ImageToolUI:
         self.root.title("Image Processing Tool")
 
         self.input_path = ""
-        self.preview_img = None
+        self.orig_img = None
+        self.out_img = None
 
         self._build()
 
@@ -59,17 +60,27 @@ class ImageToolUI:
             row=5, column=0, columnspan=2, pady=5
         )
 
-        # ---- preview ----
-        self.preview = tk.Label(self.root)
-        self.preview.grid(row=6, column=0, columnspan=2, pady=5)
+        # ---- preview labels ----
+        tk.Label(self.root, text="Original").grid(row=6, column=0)
+        tk.Label(self.root, text="Transformed").grid(row=6, column=1)
+
+        # ---- previews ----
+        self.left_preview = tk.Label(self.root)
+        self.left_preview.grid(row=7, column=0, pady=5)
+
+        self.right_preview = tk.Label(self.root)
+        self.right_preview.grid(row=7, column=1, pady=5)
 
         # ---- help ----
         tk.Label(self.root, text="Help / Commands").grid(row=0, column=2, sticky="w")
-        self.help_box = tk.Text(self.root, width=55, height=25)
-        self.help_box.grid(row=1, column=2, rowspan=6, padx=10)
+        self.help_box = tk.Text(self.root, width=55, height=30)
+        self.help_box.grid(row=1, column=2, rowspan=7, padx=10)
         self.help_box.insert("1.0", self._help_text())
         self.help_box.config(state="disabled")
 
+    # -------------------------
+    # Input Handling
+    # -------------------------
     def pick_input(self):
         self.input_path = filedialog.askopenfilename(
             filetypes=[("TIFF Images", "*.tif *.tiff"), ("All files", "*.*")]
@@ -78,7 +89,7 @@ class ImageToolUI:
             return
 
         self.input_label.config(text=os.path.basename(self.input_path))
-        self._show_preview(self.input_path)
+        self._show_original(self.input_path)
 
     def run(self):
         if not self.input_path:
@@ -97,25 +108,39 @@ class ImageToolUI:
             messagebox.showerror("Error", "Output name is empty")
             return
 
-        # output saved next to input
         out_path = os.path.join(os.path.dirname(self.input_path), out_name + ".tiff")
 
         try:
             InputHandler.run_from_ui(cmd, self.input_path, out_path, params)
-            self._show_preview(out_path)
+            self._show_output(out_path)
 
         except Exception as e:
             messagebox.showerror("Execution Error", str(e))
 
-    def _show_preview(self, path):
+    # -------------------------
+    # Preview Helpers
+    # -------------------------
+    def _show_original(self, path):
         try:
             img = Image.open(path).convert("L")
             img.thumbnail((256, 256))
-            self.preview_img = ImageTk.PhotoImage(img)
-            self.preview.config(image=self.preview_img)
+            self.orig_img = ImageTk.PhotoImage(img)
+            self.left_preview.config(image=self.orig_img)
         except:
             pass
 
+    def _show_output(self, path):
+        try:
+            img = Image.open(path).convert("L")
+            img.thumbnail((256, 256))
+            self.out_img = ImageTk.PhotoImage(img)
+            self.right_preview.config(image=self.out_img)
+        except:
+            pass
+
+    # -------------------------
+    # Help Text
+    # -------------------------
     def _help_text(self):
         return (
             "Available Commands:\n\n"
@@ -147,7 +172,7 @@ class ImageToolUI:
             "grad_sharpen <k>\n\n"
             "Notes:\n"
             "- Output is saved next to input image\n"
-            "- Enter params space-separated (like CLI)\n"
+            "- Parameters are space-separated (CLI style)\n"
         )
 
     def start(self):
@@ -228,6 +253,9 @@ class LogTransformEvent:
 
 class GammaTransformEvent:
     def __init__(self, inp, out, gamma):
+        if gamma <= 0:
+            raise RuntimeError("Gamma must be > 0")
+
         self.inp = inp
         self.out = out
         self.gamma = gamma
@@ -235,11 +263,16 @@ class GammaTransformEvent:
     def execute(self):
         img = ImageObject(self.inp)
 
-        min_val = img.data.min()
-        max_val = img.data.max()
+        L = img.levels - 1
 
-        norm = img.data / max_val
-        img.data = np.round((norm**self.gamma) * max_val).astype(img.data.dtype)
+        # normalize to [0,1]
+        r = img.data.astype(np.float64) / L
+
+        # gamma transform
+        s = np.power(r, self.gamma)
+
+        # scale back to [0, L-1]
+        img.data = np.round(s * L).astype(img.data.dtype)
 
         img.save_tiff_8bit(self.out)
 
@@ -311,6 +344,11 @@ class IntensityLevelSlicingEvent:
 
     def execute(self):
         img = ImageObject(self.inp)
+        L = img.levels - 1
+
+        if not (0 <= self.k <= L):
+            raise RuntimeError(f"k must be in [0, {L}]")
+
         lut = np.zeros(img.levels, dtype=np.uint16)
 
         for r in range(img.levels):
@@ -320,7 +358,7 @@ class IntensityLevelSlicingEvent:
                 lut[r] = r if self.mode == SliceMode.WITH_BG else 0
 
         img.data = lut[img.data]
-        img.save_tiff(self.out)
+        img.save_tiff_8bit(self.out)
 
 
 class BitPlaneSliceEvent:
