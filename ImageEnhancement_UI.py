@@ -2,10 +2,156 @@ import copy
 import math
 import os
 
+# =========================
+# SIMPLE UI (Fancy CLI)
+# =========================
+import tkinter as tk
+from enum import Enum
+from tkinter import filedialog, messagebox
+
 import numpy as np
 import tifffile as tiff
-from PIL import Image, ImageTk  # pip install pillow
+from PIL import Image, ImageTk  # pip install pillow  # pip install pillow
 from typing_extensions import NoDefault
+
+
+class ImageToolUI:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("Image Processing Tool")
+
+        self.input_path = ""
+        self.preview_img = None
+
+        self._build()
+
+    def _build(self):
+        # ---- command ----
+        tk.Label(self.root, text="Command").grid(row=0, column=0, sticky="w")
+        self.cmd_entry = tk.Entry(self.root, width=30)
+        self.cmd_entry.grid(row=0, column=1, sticky="w")
+
+        # ---- params ----
+        tk.Label(self.root, text="Parameters (space separated)").grid(
+            row=1, column=0, sticky="w"
+        )
+        self.param_entry = tk.Entry(self.root, width=30)
+        self.param_entry.grid(row=1, column=1, sticky="w")
+
+        # ---- output name ----
+        tk.Label(self.root, text="Output name (no extension)").grid(
+            row=2, column=0, sticky="w"
+        )
+        self.output_entry = tk.Entry(self.root, width=30)
+        self.output_entry.insert(0, "output")
+        self.output_entry.grid(row=2, column=1, sticky="w")
+
+        # ---- input ----
+        tk.Button(self.root, text="Select Input Image", command=self.pick_input).grid(
+            row=3, column=0, columnspan=2, pady=5
+        )
+
+        self.input_label = tk.Label(self.root, text="No file selected")
+        self.input_label.grid(row=4, column=0, columnspan=2)
+
+        # ---- run ----
+        tk.Button(self.root, text="Run", command=self.run).grid(
+            row=5, column=0, columnspan=2, pady=5
+        )
+
+        # ---- preview ----
+        self.preview = tk.Label(self.root)
+        self.preview.grid(row=6, column=0, columnspan=2, pady=5)
+
+        # ---- help ----
+        tk.Label(self.root, text="Help / Commands").grid(row=0, column=2, sticky="w")
+        self.help_box = tk.Text(self.root, width=55, height=25)
+        self.help_box.grid(row=1, column=2, rowspan=6, padx=10)
+        self.help_box.insert("1.0", self._help_text())
+        self.help_box.config(state="disabled")
+
+    def pick_input(self):
+        self.input_path = filedialog.askopenfilename(
+            filetypes=[("TIFF Images", "*.tif *.tiff"), ("All files", "*.*")]
+        )
+        if not self.input_path:
+            return
+
+        self.input_label.config(text=os.path.basename(self.input_path))
+        self._show_preview(self.input_path)
+
+    def run(self):
+        if not self.input_path:
+            messagebox.showerror("Error", "No input image selected")
+            return
+
+        cmd = self.cmd_entry.get().strip()
+        if not cmd:
+            messagebox.showerror("Error", "Command is empty")
+            return
+
+        params = self.param_entry.get().strip().split()
+        out_name = self.output_entry.get().strip()
+
+        if not out_name:
+            messagebox.showerror("Error", "Output name is empty")
+            return
+
+        # output saved next to input
+        out_path = os.path.join(os.path.dirname(self.input_path), out_name + ".tiff")
+
+        try:
+            InputHandler.run_from_ui(cmd, self.input_path, out_path, params)
+            self._show_preview(out_path)
+
+        except Exception as e:
+            messagebox.showerror("Execution Error", str(e))
+
+    def _show_preview(self, path):
+        try:
+            img = Image.open(path).convert("L")
+            img.thumbnail((256, 256))
+            self.preview_img = ImageTk.PhotoImage(img)
+            self.preview.config(image=self.preview_img)
+        except:
+            pass
+
+    def _help_text(self):
+        return (
+            "Available Commands:\n\n"
+            "invert\n"
+            "log\n"
+            "gamma <gamma>\n"
+            "contrast <r1> <s1> <r2> <s2>\n"
+            "ramp <start> <end>\n"
+            "slice <r1> <r2> <k> <bg|nobg>\n"
+            "bit_slice <bit> <bg|nobg>\n"
+            "hist_eq\n"
+            "hist_stats\n"
+            "hist_match <ref_image>\n"
+            "local_hist <window>\n"
+            "smooth_box <kernel>\n"
+            "gaussian <kernel> <sigma>\n"
+            "sharpen <strength>\n"
+            "unsharp <A>\n"
+            "grad_edge <k>\n"
+            "lap_sobel <lap_out> <sharp_out> <sobel_out>\n"
+            "median <window>\n"
+            "roberts\n"
+            "prewitt\n"
+            "sobel [threshold]\n"
+            "laplacian <lap_out> <sharp_out> <4|8>\n"
+            "bandpass <k1> <sigma1> <k2> <sigma2>\n"
+            "bandreject <k1> <sigma1> <k2> <sigma2>\n"
+            "weighted_avg\n"
+            "grad_sharpen <k>\n\n"
+            "Notes:\n"
+            "- Output is saved next to input image\n"
+            "- Enter params space-separated (like CLI)\n"
+        )
+
+    def start(self):
+        self.root.mainloop()
 
 
 # -------------------------
@@ -1029,6 +1175,18 @@ class GradientSharpenEvent:
 
 class InputHandler:
     @staticmethod
+    def run_from_ui(cmd, inp, out, params):
+        """
+        Called by GUI.
+        cmd: str
+        inp: input image path
+        out: output image path
+        params: list[str]
+        """
+        parts = [cmd, inp, out] + params
+        InputHandler._dispatch(parts)
+
+    @staticmethod
     def run():
         while True:
             print("\nCommands:")
@@ -1064,150 +1222,157 @@ class InputHandler:
             if not parts:
                 continue
 
-            cmd = parts[0]
+            if parts[0] == "quit":
+                print("Exiting.")
+                break
 
-            try:
-                if cmd == "invert":
-                    _, inp, out = parts
-                    InvertImageEvent(inp, out).execute()
+            InputHandler._dispatch(parts)
 
-                elif cmd == "log":
-                    _, inp, out = parts
-                    LogTransformEvent(inp, out).execute()
+    @staticmethod
+    def _dispatch(parts):
+        cmd = parts[0]
 
-                elif cmd == "gamma":
-                    _, inp, out, g = parts
-                    GammaTransformEvent(inp, out, float(g)).execute()
+        try:
+            if cmd == "invert":
+                _, inp, out = parts
+                InvertImageEvent(inp, out).execute()
 
-                elif cmd == "contrast":
-                    _, inp, out, r1, s1, r2, s2 = parts
-                    PieceWiseContrastEvent(
-                        inp, out, int(r1), int(s1), int(r2), int(s2)
-                    ).execute()
+            elif cmd == "log":
+                _, inp, out = parts
+                LogTransformEvent(inp, out).execute()
 
-                elif cmd == "ramp":
-                    _, inp, out, start, end = parts
-                    IntensityRampEvent(inp, out, int(start), int(end)).execute()
+            elif cmd == "gamma":
+                _, inp, out, g = parts
+                GammaTransformEvent(inp, out, float(g)).execute()
 
-                elif cmd == "slice":
-                    _, inp, out, r1, r2, k, mode = parts
-                    IntensityLevelSlicingEvent(
-                        inp, out, int(r1), int(r2), int(k), mode
-                    ).execute()
+            elif cmd == "contrast":
+                _, inp, out, r1, s1, r2, s2 = parts
+                PieceWiseContrastEvent(
+                    inp, out, int(r1), int(s1), int(r2), int(s2)
+                ).execute()
 
-                elif cmd == "bit_slice":
-                    _, inp, out, bit, mode = parts
-                    BitPlaneSliceEvent(inp, out, int(bit), mode).execute()
+            elif cmd == "ramp":
+                _, inp, out, start, end = parts
+                IntensityRampEvent(inp, out, int(start), int(end)).execute()
 
-                elif cmd == "hist_eq":
-                    _, inp, out = parts
-                    HistogramEqualizationEvent(inp, out).execute()
+            elif cmd == "slice":
+                _, inp, out, r1, r2, k, mode = parts
+                IntensityLevelSlicingEvent(
+                    inp, out, int(r1), int(r2), int(k), mode
+                ).execute()
 
-                elif cmd == "hist_stats":
-                    _, inp = parts
-                    HistogramStatsEvent(inp).execute()
+            elif cmd == "bit_slice":
+                _, inp, out, bit, mode = parts
+                BitPlaneSliceEvent(inp, out, int(bit), mode).execute()
 
-                elif cmd == "hist_match":
-                    _, src, ref, out = parts
-                    HistogramMatchingEvent(src, ref, out).execute()
+            elif cmd == "hist_eq":
+                _, inp, out = parts
+                HistogramEqualizationEvent(inp, out).execute()
 
-                elif cmd == "local_hist":
-                    _, inp, out, w = parts
-                    LocalHistogramEnhancementEvent(inp, out, int(w)).execute()
+            elif cmd == "hist_stats":
+                _, inp = parts
+                HistogramStatsEvent(inp).execute()
 
-                elif cmd == "smooth_box":
-                    _, inp, out, k = parts
-                    BoxSmoothingEvent(inp, out, int(k)).execute()
+            elif cmd == "hist_match":
+                _, src, ref, out = parts
+                HistogramMatchingEvent(src, ref, out).execute()
 
-                elif cmd == "gaussian":
-                    _, inp, out, k, sigma = parts
-                    GaussianLowPassEvent(inp, out, int(k), float(sigma)).execute()
+            elif cmd == "local_hist":
+                _, inp, out, w = parts
+                LocalHistogramEnhancementEvent(inp, out, int(w)).execute()
 
-                elif cmd == "sharpen":
-                    _, inp, out, strength = parts
-                    HighPassSharpenEvent(inp, out, float(strength)).execute()
+            elif cmd == "smooth_box":
+                _, inp, out, k = parts
+                BoxSmoothingEvent(inp, out, int(k)).execute()
 
-                elif cmd == "unsharp":
-                    _, inp, out, A = parts
-                    UnsharpHighboostEvent(inp, out, float(A)).execute()
+            elif cmd == "gaussian":
+                _, inp, out, k, sigma = parts
+                GaussianLowPassEvent(inp, out, int(k), float(sigma)).execute()
 
-                elif cmd == "grad_edge":
-                    _, inp, out, k = parts
-                    GradientEdgeEnhancementEvent(inp, out, float(k)).execute()
+            elif cmd == "sharpen":
+                _, inp, out, strength = parts
+                HighPassSharpenEvent(inp, out, float(strength)).execute()
 
-                elif cmd == "lap_sobel":
-                    _, inp, lap, sharp, sobel = parts
-                    LaplacianSobelSharpenEvent(inp, lap, sharp, sobel).execute()
+            elif cmd == "unsharp":
+                _, inp, out, A = parts
+                UnsharpHighboostEvent(inp, out, float(A)).execute()
 
-                elif cmd == "median":
-                    _, inp, out, w = parts
-                    MedianFilterEvent(inp, out, int(w)).execute()
+            elif cmd == "grad_edge":
+                _, inp, out, k = parts
+                GradientEdgeEnhancementEvent(inp, out, float(k)).execute()
 
-                elif cmd == "roberts":
-                    _, inp, out = parts
-                    RobertsEdgeEvent(inp, out).execute()
+            elif cmd == "lap_sobel":
+                _, inp, lap, sharp, sobel = parts
+                LaplacianSobelSharpenEvent(inp, lap, sharp, sobel).execute()
 
-                elif cmd == "prewitt":
-                    _, inp, out = parts
-                    PrewittEdgeEvent(inp, out).execute()
+            elif cmd == "median":
+                _, inp, out, w = parts
+                MedianFilterEvent(inp, out, int(w)).execute()
 
-                elif cmd == "sobel":
-                    if len(parts) == 4:
-                        _, inp, out, t = parts
-                        SobelEdgeEvent(inp, out, int(t)).execute()
-                    else:
-                        _, inp, out = parts
-                        SobelEdgeEvent(inp, out).execute()
+            elif cmd == "roberts":
+                _, inp, out = parts
+                RobertsEdgeEvent(inp, out).execute()
 
-                elif cmd == "laplacian":
-                    _, inp, lap, sharp, mode = parts
-                    lap_mode = (
-                        LaplacianMode.EIGHT if mode == "8" else LaplacianMode.FOUR
-                    )
-                    LaplacianSharpenEvent(inp, lap, sharp, lap_mode).execute()
+            elif cmd == "prewitt":
+                _, inp, out = parts
+                PrewittEdgeEvent(inp, out).execute()
 
-                elif cmd == "bandpass":
-                    _, inp, out, k1, s1, k2, s2 = parts
-                    BandFilterEvent(
-                        inp,
-                        out,
-                        int(k1),
-                        float(s1),
-                        int(k2),
-                        float(s2),
-                        BandMode.BANDPASS,
-                    ).execute()
-
-                elif cmd == "bandreject":
-                    _, inp, out, k1, s1, k2, s2 = parts
-                    BandFilterEvent(
-                        inp,
-                        out,
-                        int(k1),
-                        float(s1),
-                        int(k2),
-                        float(s2),
-                        BandMode.BANDREJECT,
-                    ).execute()
-
-                elif cmd == "weighted_avg":
-                    _, inp, out = parts
-                    WeightedAveragingEvent(inp, out).execute()
-
-                elif cmd == "grad_sharpen":
-                    _, inp, out, k = parts
-                    GradientSharpenEvent(inp, out, float(k)).execute()
-
-                elif cmd == "quit":
-                    print("Exiting.")
-                    break
-
+            elif cmd == "sobel":
+                if len(parts) == 4:
+                    _, inp, out, t = parts
+                    SobelEdgeEvent(inp, out, int(t)).execute()
                 else:
-                    print("Unknown command")
+                    _, inp, out = parts
+                    SobelEdgeEvent(inp, out).execute()
 
-            except Exception as e:
-                print("Error:", e)
+            elif cmd == "laplacian":
+                _, inp, lap, sharp, mode = parts
+                lap_mode = LaplacianMode.EIGHT if mode == "8" else LaplacianMode.FOUR
+                LaplacianSharpenEvent(inp, lap, sharp, lap_mode).execute()
+
+            elif cmd == "bandpass":
+                _, inp, out, k1, s1, k2, s2 = parts
+                BandFilterEvent(
+                    inp,
+                    out,
+                    int(k1),
+                    float(s1),
+                    int(k2),
+                    float(s2),
+                    BandMode.BANDPASS,
+                ).execute()
+
+            elif cmd == "bandreject":
+                _, inp, out, k1, s1, k2, s2 = parts
+                BandFilterEvent(
+                    inp,
+                    out,
+                    int(k1),
+                    float(s1),
+                    int(k2),
+                    float(s2),
+                    BandMode.BANDREJECT,
+                ).execute()
+
+            elif cmd == "weighted_avg":
+                _, inp, out = parts
+                WeightedAveragingEvent(inp, out).execute()
+
+            elif cmd == "grad_sharpen":
+                _, inp, out, k = parts
+                GradientSharpenEvent(inp, out, float(k)).execute()
+
+            else:
+                print("Unknown command")
+
+        except Exception as e:
+            print("Error:", e)
 
 
 if __name__ == "__main__":
-    InputHandler.run()
+    mode = input("Select mode (cli / ui): ").strip().lower()
+
+    if mode == "ui":
+        ImageToolUI().start()
+    else:
+        InputHandler.run()
