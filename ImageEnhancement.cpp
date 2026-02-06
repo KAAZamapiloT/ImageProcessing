@@ -1155,7 +1155,8 @@ private:
                 double mask = original - blurred[y * W + x];
 
                 double result =
-                    original + (m_A - 1.0) * mask;
+                    m_A * original - blurred[y * W + x];
+
 
                 img[y][x] = static_cast<uint16_t>(
                     std::clamp(result, 0.0, (double)(L - 1))
@@ -1334,6 +1335,534 @@ private:
     }
 };
 
+class MedianFilterEvent {
+public:
+    MedianFilterEvent(const std::string& in,
+                      const std::string& out,
+                      uint32_t windowSize)
+        : m_InputPath(in),
+          m_OutputPath(out),
+          m_Window(windowSize)
+    {
+        if (windowSize < 3 || windowSize % 2 == 0)
+            throw std::runtime_error("Median window must be odd and >= 3");
+    }
+
+    void execute() {
+        ImageObject img(m_InputPath);
+        apply(img);
+        img.saveTIFF8bit(m_OutputPath);
+    }
+
+private:
+    std::string m_InputPath, m_OutputPath;
+    uint32_t m_Window;
+
+    void apply(ImageObject& img) {
+        const uint32_t W = img.width();
+        const uint32_t H = img.height();
+        const uint32_t L = img.levels();
+        const int r = static_cast<int>(m_Window / 2);
+
+        std::vector<uint16_t> out(W * H);
+        std::vector<uint16_t> neighborhood;
+        neighborhood.reserve(m_Window * m_Window);
+
+        for (int y = 0; y < (int)H; y++) {
+            for (int x = 0; x < (int)W; x++) {
+
+                neighborhood.clear();
+
+                for (int dy = -r; dy <= r; dy++) {
+                    for (int dx = -r; dx <= r; dx++) {
+                        int yy = std::clamp(y + dy, 0, (int)H - 1);
+                        int xx = std::clamp(x + dx, 0, (int)W - 1);
+                        neighborhood.push_back(img[yy][xx]);
+                    }
+                }
+
+                std::nth_element(
+                    neighborhood.begin(),
+                    neighborhood.begin() + neighborhood.size() / 2,
+                    neighborhood.end()
+                );
+
+                out[y * W + x] =
+                    neighborhood[neighborhood.size() / 2];
+            }
+        }
+
+        // write back
+        for (uint32_t y = 0; y < H; y++)
+            for (uint32_t x = 0; x < W; x++)
+                img[y][x] = out[y * W + x];
+    }
+};
+
+
+class RobertsEdgeEvent {
+public:
+    RobertsEdgeEvent(const std::string& in,
+                     const std::string& out)
+        : m_InputPath(in),
+          m_OutputPath(out) {}
+
+    void execute() {
+        ImageObject img(m_InputPath);
+        apply(img);
+        img.saveTIFF8bit(m_OutputPath);
+    }
+
+private:
+    std::string m_InputPath, m_OutputPath;
+
+    void apply(ImageObject& img) {
+        const uint32_t W = img.width();
+        const uint32_t H = img.height();
+        const uint32_t L = img.levels();
+
+        std::vector<uint16_t> out(W * H, 0);
+
+        for (uint32_t y = 0; y < H - 1; y++) {
+            for (uint32_t x = 0; x < W - 1; x++) {
+
+                int gx =
+                    img[y][x] - img[y + 1][x + 1];
+
+                int gy =
+                    img[y][x + 1] - img[y + 1][x];
+
+                int mag = std::abs(gx) + std::abs(gy);
+
+                out[y * W + x] =
+                    static_cast<uint16_t>(
+                        std::clamp(mag, 0, (int)L - 1)
+                    );
+            }
+        }
+
+        for (uint32_t y = 0; y < H; y++)
+            for (uint32_t x = 0; x < W; x++)
+                img[y][x] = out[y * W + x];
+    }
+};
+
+class PrewittEdgeEvent {
+public:
+    PrewittEdgeEvent(const std::string& in,
+                     const std::string& out)
+        : m_InputPath(in),
+          m_OutputPath(out) {}
+
+    void execute() {
+        ImageObject img(m_InputPath);
+        apply(img);
+        img.saveTIFF8bit(m_OutputPath);
+    }
+
+private:
+    std::string m_InputPath, m_OutputPath;
+
+    void apply(ImageObject& img) {
+        const uint32_t W = img.width();
+        const uint32_t H = img.height();
+        const uint32_t L = img.levels();
+
+        const int Gx[3][3] = {
+            {-1, 0, 1},
+            {-1, 0, 1},
+            {-1, 0, 1}
+        };
+
+        const int Gy[3][3] = {
+            {-1, -1, -1},
+            { 0,  0,  0},
+            { 1,  1,  1}
+        };
+
+        std::vector<uint16_t> out(W * H, 0);
+
+        for (int y = 1; y < (int)H - 1; y++) {
+            for (int x = 1; x < (int)W - 1; x++) {
+
+                int gx = 0, gy = 0;
+
+                for (int ky = -1; ky <= 1; ky++)
+                    for (int kx = -1; kx <= 1; kx++) {
+                        uint16_t p = img[y + ky][x + kx];
+                        gx += Gx[ky + 1][kx + 1] * p;
+                        gy += Gy[ky + 1][kx + 1] * p;
+                    }
+
+                int mag = std::abs(gx) + std::abs(gy);
+
+                out[y * W + x] =
+                    static_cast<uint16_t>(
+                        std::clamp(mag, 0, (int)L - 1)
+                    );
+            }
+        }
+
+        for (uint32_t y = 0; y < H; y++)
+            for (uint32_t x = 0; x < W; x++)
+                img[y][x] = out[y * W + x];
+    }
+};
+
+class SobelEdgeEvent {
+public:
+    SobelEdgeEvent(const std::string& in,
+                   const std::string& out,
+                   uint16_t threshold = 0)
+        : m_InputPath(in),
+          m_OutputPath(out),
+          m_Threshold(threshold) {}
+
+    void execute() {
+        ImageObject img(m_InputPath);
+        apply(img);
+        img.saveTIFF8bit(m_OutputPath);
+    }
+
+private:
+    std::string m_InputPath, m_OutputPath;
+    uint16_t m_Threshold; // 0 = no threshold
+
+    void apply(ImageObject& img) {
+        const uint32_t W = img.width();
+        const uint32_t H = img.height();
+        const uint32_t L = img.levels();
+
+        const int Gx[3][3] = {
+            {-1, 0, 1},
+            {-2, 0, 2},
+            {-1, 0, 1}
+        };
+
+        const int Gy[3][3] = {
+            {-1, -2, -1},
+            { 0,  0,  0},
+            { 1,  2,  1}
+        };
+
+        std::vector<uint16_t> mag(W * H, 0);
+        uint16_t maxMag = 0;
+
+        // ---- compute gradient magnitude ----
+        for (int y = 1; y < (int)H - 1; y++) {
+            for (int x = 1; x < (int)W - 1; x++) {
+
+                int gx = 0, gy = 0;
+
+                for (int ky = -1; ky <= 1; ky++)
+                    for (int kx = -1; kx <= 1; kx++) {
+                        uint16_t p = img[y + ky][x + kx];
+                        gx += Gx[ky + 1][kx + 1] * p;
+                        gy += Gy[ky + 1][kx + 1] * p;
+                    }
+
+                int g = std::abs(gx) + std::abs(gy);
+                mag[y * W + x] = g;
+                maxMag = std::max(maxMag, (uint16_t)g);
+            }
+        }
+
+        // ---- normalize + threshold ----
+        for (uint32_t y = 0; y < H; y++) {
+            for (uint32_t x = 0; x < W; x++) {
+
+                uint16_t v = mag[y * W + x];
+
+                uint16_t norm =
+                    (maxMag > 0)
+                        ? static_cast<uint16_t>((v * (L - 1)) / maxMag)
+                        : 0;
+
+                if (m_Threshold > 0)
+                    img[y][x] = (norm >= m_Threshold) ? (L - 1) : 0;
+                else
+                    img[y][x] = norm;
+            }
+        }
+    }
+};
+
+
+class LaplacianSharpenEvent {
+public:
+    enum class Mode { FOUR, EIGHT };
+
+    LaplacianSharpenEvent(const std::string& in,
+                          const std::string& lapOut,
+                          const std::string& sharpOut,
+                          Mode mode)
+        : m_Input(in),
+          m_LapOut(lapOut),
+          m_SharpOut(sharpOut),
+          m_Mode(mode) {}
+
+    void execute() {
+        ImageObject img(m_Input);
+        ImageObject lap = img;
+        ImageObject sharp = img;
+
+        applyLaplacian(img, lap);
+        applySharpen(img, lap, sharp);
+
+        lap.saveTIFF8bit(m_LapOut);
+        sharp.saveTIFF8bit(m_SharpOut);
+    }
+
+private:
+    std::string m_Input, m_LapOut, m_SharpOut;
+    Mode m_Mode;
+
+    void applyLaplacian(const ImageObject& in, ImageObject& out) {
+        const int K4[3][3] = {
+            { 0, -1,  0},
+            {-1,  4, -1},
+            { 0, -1,  0}
+        };
+
+        const int K8[3][3] = {
+            {-1,-1,-1},
+            {-1, 8,-1},
+            {-1,-1,-1}
+        };
+
+        const int (*K)[3] = (m_Mode == Mode::FOUR) ? K4 : K8;
+
+        const int H = in.height();
+        const int W = in.width();
+        const int L = in.levels();
+
+        for (int y = 1; y < H - 1; y++) {
+            for (int x = 1; x < W - 1; x++) {
+
+                int sum = 0;
+                for (int j = -1; j <= 1; j++)
+                    for (int i = -1; i <= 1; i++)
+                        sum += K[j+1][i+1] * in[y+j][x+i];
+
+                out[y][x] = std::clamp(sum, 0, L - 1);
+            }
+        }
+    }
+
+    void applySharpen(const ImageObject& orig,
+                      const ImageObject& lap,
+                      ImageObject& out) {
+
+        const int L = orig.levels();
+
+        for (uint32_t y = 0; y < orig.height(); y++) {
+            for (uint32_t x = 0; x < orig.width(); x++) {
+
+                int v = orig[y][x] + lap[y][x];
+                out[y][x] = std::clamp(v, 0, L - 1);
+            }
+        }
+    }
+};
+
+
+class BandFilterEvent {
+public:
+    enum class Mode {
+        BANDPASS,
+        BANDREJECT
+    };
+
+    BandFilterEvent(const std::string& in,
+                    const std::string& out,
+                    uint32_t k1, double s1,
+                    uint32_t k2, double s2,
+                    Mode mode)
+        : m_Input(in), m_Output(out),
+          m_K1(k1), m_S1(s1),
+          m_K2(k2), m_S2(s2),
+          m_Mode(mode) {}
+
+    void execute() {
+        ImageObject img(m_Input);
+        ImageObject lp1 = img;
+        ImageObject lp2 = img;
+
+        gaussian(lp1, m_K1, m_S1);
+        gaussian(lp2, m_K2, m_S2);
+
+        apply(img, lp1, lp2);
+        img.saveTIFF8bit(m_Output);
+    }
+
+private:
+    std::string m_Input, m_Output;
+    uint32_t m_K1, m_K2;
+    double m_S1, m_S2;
+    Mode m_Mode;
+
+    void gaussian(ImageObject& img, uint32_t k, double sigma) {
+        GaussianLowPassEvent("", "", k, sigma).execute(); // reuse logic
+    }
+
+    void apply(ImageObject& img,
+               const ImageObject& lp1,
+               const ImageObject& lp2) {
+
+        const uint32_t H = img.height();
+        const uint32_t W = img.width();
+        const uint32_t L = img.levels();
+
+        for (uint32_t y = 0; y < H; y++) {
+            for (uint32_t x = 0; x < W; x++) {
+
+                double val;
+
+                if (m_Mode == Mode::BANDPASS) {
+                    val = lp2[y][x] - lp1[y][x];
+                } else {
+                    val = lp1[y][x] + (img[y][x] - lp2[y][x]);
+                }
+
+                img[y][x] = static_cast<uint16_t>(
+                    std::clamp(val, 0.0, (double)(L - 1))
+                );
+            }
+        }
+    }
+};
+
+class WeightedAveragingEvent {
+public:
+    WeightedAveragingEvent(const std::string& in,
+                           const std::string& out)
+        : m_InputPath(in),
+          m_OutputPath(out) {}
+
+    void execute() {
+        ImageObject img(m_InputPath);
+        apply(img);
+        img.saveTIFF8bit(m_OutputPath);
+    }
+
+private:
+    std::string m_InputPath, m_OutputPath;
+
+    void apply(ImageObject& img) {
+        const uint32_t W = img.width();
+        const uint32_t H = img.height();
+        const uint32_t L = img.levels();
+
+        // Weighted averaging kernel (DIP standard)
+        const int K[3][3] = {
+            {1, 2, 1},
+            {2, 4, 2},
+            {1, 2, 1}
+        };
+        const int Ksum = 16;
+
+        std::vector<uint16_t> out(W * H, 0);
+
+        for (int y = 1; y < (int)H - 1; y++) {
+            for (int x = 1; x < (int)W - 1; x++) {
+
+                int acc = 0;
+                for (int ky = -1; ky <= 1; ky++) {
+                    for (int kx = -1; kx <= 1; kx++) {
+                        acc += K[ky + 1][kx + 1] *
+                               img[y + ky][x + kx];
+                    }
+                }
+
+                out[y * W + x] =
+                    static_cast<uint16_t>(
+                        std::clamp(acc / Ksum, 0, (int)L - 1)
+                    );
+            }
+        }
+
+        // write back
+        for (uint32_t y = 0; y < H; y++)
+            for (uint32_t x = 0; x < W; x++)
+                img[y][x] = out[y * W + x];
+    }
+};
+
+class GradientSharpenEvent {
+public:
+    GradientSharpenEvent(const std::string& in,
+                         const std::string& out,
+                         double k)
+        : m_InputPath(in),
+          m_OutputPath(out),
+          m_K(k)
+    {
+        if (k <= 0.0)
+            throw std::runtime_error("Sharpen factor k must be > 0");
+    }
+
+    void execute() {
+        ImageObject img(m_InputPath);
+        sharpen(img);
+        img.saveTIFF8bit(m_OutputPath);
+    }
+
+private:
+    std::string m_InputPath, m_OutputPath;
+    double m_K;
+
+    void sharpen(ImageObject& img) {
+        const uint32_t W = img.width();
+        const uint32_t H = img.height();
+        const uint32_t L = img.levels();
+
+        // Sobel operators
+        const int Gx[3][3] = {
+            {-1, 0, 1},
+            {-2, 0, 2},
+            {-1, 0, 1}
+        };
+
+        const int Gy[3][3] = {
+            {-1, -2, -1},
+            { 0,  0,  0},
+            { 1,  2,  1}
+        };
+
+        std::vector<uint16_t> out(W * H, 0);
+
+        for (int y = 1; y < (int)H - 1; y++) {
+            for (int x = 1; x < (int)W - 1; x++) {
+
+                int sx = 0, sy = 0;
+
+                for (int ky = -1; ky <= 1; ky++) {
+                    for (int kx = -1; kx <= 1; kx++) {
+                        uint16_t p = img[y + ky][x + kx];
+                        sx += Gx[ky + 1][kx + 1] * p;
+                        sy += Gy[ky + 1][kx + 1] * p;
+                    }
+                }
+
+                double gradMag = std::abs(sx) + std::abs(sy);
+
+                double sharpened =
+                    img[y][x] + m_K * gradMag;
+
+                out[y * W + x] =
+                    static_cast<uint16_t>(
+                        std::clamp(sharpened, 0.0, (double)(L - 1))
+                    );
+            }
+        }
+
+        // write back
+        for (uint32_t y = 0; y < H; y++)
+            for (uint32_t x = 0; x < W; x++)
+                img[y][x] = out[y * W + x];
+    }
+};
+
 class InputHandler {
 public:
     static void run() {
@@ -1358,6 +1887,16 @@ public:
             std::cout << "unsharp <input> <output> <A>\n";
             std::cout << "grad_edge <input> <output> <k>\n";
              std::cout<<"lap_sobel <input> <lap_out> <sharp_out> <sobel_out>\n";
+             std::cout << "median <input> <output> <windowSize>\n";
+             std::cout << "roberts <input> <output>\n";
+             std::cout << "prewitt <input> <output>\n";
+             std::cout << "sobel <input> <output> [threshold]\n";
+             std::cout << "laplacian <input> <lap_out> <sharp_out> <4|8>\n";
+             std::cout << "bandpass <in> <out> <k1> <s1> <k2> <s2>\n";
+             std::cout << "bandreject <in> <out> <k1> <s1> <k2> <s2>\n";
+             std::cout << "weighted_avg <input> <output>\n";
+             std::cout << "grad_sharpen <input> <output> <k>\n";
+
             std::cout << "quit\n";
 
             std::cin >> cmd;
@@ -1467,6 +2006,79 @@ else if(cmd=="gamma"){
                 LaplacianSobelSharpenEvent(in, lap, sharp, sobel).execute();
                 std::cout << "Laplacian + Sobel sharpening done.\n";
             }
+            else if (cmd == "median") {
+                std::string in, out;
+                uint32_t w;
+                std::cin >> in >> out >> w;
+                MedianFilterEvent(in, out, w).execute();
+                std::cout << "Median filtering done.\n";
+            }else if (cmd == "roberts") {
+                std::string in, out;
+                std::cin >> in >> out;
+                RobertsEdgeEvent(in, out).execute();
+                std::cout << "Roberts edge detection done.\n";
+            }
+            else if (cmd == "prewitt") {
+                std::string in, out;
+                std::cin >> in >> out;
+                PrewittEdgeEvent(in, out).execute();
+                std::cout << "Prewitt edge detection done.\n";
+            }
+
+            else if (cmd == "sobel") {
+                std::string in, out;
+                uint16_t t = 0;
+                std::cin >> in >> out;
+                if (std::cin.peek() != '\n')
+                    std::cin >> t;
+
+                SobelEdgeEvent(in, out, t).execute();
+                std::cout << "Sobel edge detection done.\n";
+            }
+            else if (cmd == "laplacian") {
+                std::string in, lap, sharp;
+                int mode;
+                std::cin >> in >> lap >> sharp >> mode;
+
+                LaplacianSharpenEvent::Mode m =
+                    (mode == 8)
+                        ? LaplacianSharpenEvent::Mode::EIGHT
+                        : LaplacianSharpenEvent::Mode::FOUR;
+
+                LaplacianSharpenEvent(in, lap, sharp, m).execute();
+                std::cout << "Laplacian sharpening done.\n";
+            }
+            else if (cmd == "bandpass") {
+                std::string in, out;
+                uint32_t k1, k2;
+                double s1, s2;
+                std::cin >> in >> out >> k1 >> s1 >> k2 >> s2;
+                BandFilterEvent(in, out, k1, s1, k2, s2,
+                    BandFilterEvent::Mode::BANDPASS).execute();
+            }
+
+            else if (cmd == "bandreject") {
+                std::string in, out;
+                uint32_t k1, k2;
+                double s1, s2;
+                std::cin >> in >> out >> k1 >> s1 >> k2 >> s2;
+                BandFilterEvent(in, out, k1, s1, k2, s2,
+                    BandFilterEvent::Mode::BANDREJECT).execute();
+            }
+else if (cmd == "weighted_avg") {
+    std::string in, out;
+    std::cin >> in >> out;
+    WeightedAveragingEvent(in, out).execute();
+    std::cout << "Weighted averaging done.\n";
+}
+else if (cmd == "grad_sharpen") {
+    std::string in, out;
+    double k;
+    std::cin >> in >> out >> k;
+    GradientSharpenEvent(in, out, k).execute();
+    std::cout << "Gradient sharpening done.\n";
+}
+
 
             else if (cmd == "quit") {
                 break;
