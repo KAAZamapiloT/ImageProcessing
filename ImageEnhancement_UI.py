@@ -9,6 +9,7 @@ import tkinter as tk
 from enum import Enum
 from tkinter import filedialog, messagebox
 
+import matplotlib.pyplot as plt  # pip install matplotlib
 import numpy as np
 import tifffile as tiff
 from PIL import Image, ImageTk  # pip install pillow  # pip install pillow
@@ -170,6 +171,9 @@ class ImageToolUI:
             "bandreject <k1> <sigma1> <k2> <sigma2>\n"
             "weighted_avg\n"
             "grad_sharpen <k>\n\n"
+            " hist_save <input> <output>"
+            "hist_spec <src> <target> <output>"
+            "local_stats <input> <output> <window> <k0> <k1> <k2> <k3> <E>"
             "Notes:\n"
             "- Output is saved next to input image\n"
             "- Parameters are space-separated (CLI style)\n"
@@ -223,9 +227,36 @@ class ImageObject:
         return hist
 
 
+def save_histogram_image(img: ImageObject, out_path: str):
+    hist = img.compute_histogram()
+    L = img.levels
+
+    x = np.arange(L)
+
+    plt.figure(figsize=(6, 4))
+    plt.bar(x, hist, width=1.0, color="black")
+    plt.xlim([0, L - 1])
+    plt.xlabel("Gray Level")
+    plt.ylabel("Frequency")
+    plt.title("Histogram")
+
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+
 # -------------------------
 # Events
 # -------------------------
+class HistogramSaveEvent:
+    def __init__(self, inp, out_png):
+        self.inp = inp
+        self.out_png = out_png
+
+    def execute(self):
+        img = ImageObject(self.inp)
+        save_histogram_image(img, self.out_png)
+        print(f"Histogram saved: {self.out_png}")
 
 
 class InvertImageEvent:
@@ -1211,6 +1242,137 @@ class GradientSharpenEvent:
                 img.data[y][x] = out[y][x]
 
 
+class HistogramSpecificationEvent:
+    """
+    Histogram specification (a.k.a histogram matching).
+    Transforms source image histogram to match target image histogram.
+    """
+
+    def __init__(self, src_path: str, target_path: str, out_path: str):
+        self.src_path = src_path
+        self.target_path = target_path
+        self.out_path = out_path
+
+    def execute(self):
+        src = ImageObject(self.src_path)
+        target = ImageObject(self.target_path)
+
+        if src.levels != target.levels:
+            raise RuntimeError("Source and target must have same bit depth")
+
+        # ---- histograms ----
+        hist_src = self._compute_histogram(src)
+        hist_tgt = self._compute_histogram(target)
+
+        # ---- CDFs ----
+        cdf_src = self._compute_cdf(hist_src)
+        cdf_tgt = self._compute_cdf(hist_tgt)
+
+        # ---- LUT ----
+        lut = self._build_lut(cdf_src, cdf_tgt)
+
+        # ---- apply ----
+        src.data = lut[src.data]
+
+        src.save_tiff_8bit(self.out_path)
+
+    # -------------------------
+    # helpers
+    # -------------------------
+    def _compute_histogram(self, img):
+        hist = np.zeros(img.levels, dtype=np.int64)
+        for v in img.data.flat:
+            hist[int(v)] += 1
+        return hist
+
+    def _compute_cdf(self, hist):
+        cdf = hist.cumsum().astype(np.float64)
+        cdf /= cdf[-1]  # normalize to [0,1]
+        return cdf
+
+    def _build_lut(self, cdf_src, cdf_tgt):
+        L = len(cdf_src)
+        lut = np.zeros(L, dtype=np.uint16)
+
+        j = 0
+        for i in range(L):
+            while j < L - 1 and cdf_tgt[j] < cdf_src[i]:
+                j += 1
+            lut[i] = j
+
+        return lut
+
+
+class LocalHistogramStatisticsEnhancementEvent:
+    """
+    Local enhancement using histogram statistics (Gonzalez Ch-3).
+    """
+
+    def __init__(
+        self,
+        inp: str,
+        out: str,
+        window: int,
+        k0: float,
+        k1: float,
+        k2: float,
+        k3: float,
+        E: float,
+    ):
+        if window < 3 or window % 2 == 0:
+            raise RuntimeError("Window size must be odd and >= 3")
+        if E <= 0:
+            raise RuntimeError("Enhancement factor E must be > 0")
+
+        self.inp = inp
+        self.out = out
+        self.window = window
+        self.k0 = k0
+        self.k1 = k1
+        self.k2 = k2
+        self.k3 = k3
+        self.E = E
+
+    def execute(self):
+        img = ImageObject(self.inp)
+        self._enhance(img)
+        img.save_tiff_8bit(self.out)
+
+    def _enhance(self, img):
+        H, W = img.height, img.width
+        L = img.levels
+        r = self.window // 2
+
+        data = img.data.astype(np.float64)
+
+        # ---- global statistics ----
+        mG = data.mean()
+        sG = data.std()
+
+        out = data.copy()
+
+        # ---- local processing ----
+        for y in range(H):
+            for x in range(W):
+                y0 = max(y - r, 0)
+                y1 = min(y + r + 1, H)
+                x0 = max(x - r, 0)
+                x1 = min(x + r + 1, W)
+
+                local = data[y0:y1, x0:x1]
+
+                mL = local.mean()
+                sL = local.std()
+
+                if (
+                    self.k0 * mG <= mL <= self.k1 * mG
+                    and self.k2 * sG <= sL <= self.k3 * sG
+                ):
+                    out[y, x] = self.E * data[y, x]
+
+        img.data = np.clip(out, 0, L - 1).astype(img.data.dtype)
+
+
 class InputHandler:
     @staticmethod
     def run_from_ui(cmd, inp, out, params):
@@ -1254,6 +1416,10 @@ class InputHandler:
             print("bandreject <input> <output> <k1> <sigma1> <k2> <sigma2>")
             print("weighted_avg <input> <output>")
             print("grad_sharpen <input> <output> <k>")
+            print("hist_save <input> <output>")
+            print("hist_spec <src> <target> <output>")
+            print("local_stats <input> <output> <window> <k0> <k1> <k2> <k3> <E>")
+
             print("quit")
 
             parts = input("> ").strip().split()
@@ -1399,6 +1565,24 @@ class InputHandler:
             elif cmd == "grad_sharpen":
                 _, inp, out, k = parts
                 GradientSharpenEvent(inp, out, float(k)).execute()
+            elif cmd == "hist_save":
+                _, inp, out = parts
+                HistogramSaveEvent(inp, out).execute()
+            elif cmd == "hist_spec":
+                _, src, target, out = parts
+                HistogramSpecificationEvent(src, target, out).execute()
+            elif cmd == "local_stats":
+                _, inp, out, w, k0, k1, k2, k3, E = parts
+                LocalHistogramStatisticsEnhancementEvent(
+                    inp,
+                    out,
+                    int(w),
+                    float(k0),
+                    float(k1),
+                    float(k2),
+                    float(k3),
+                    float(E),
+                ).execute()
 
             else:
                 print("Unknown command")
