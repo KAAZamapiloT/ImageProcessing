@@ -363,39 +363,58 @@ struct NoiseStats {
     }
 private:
 
+int nextPow2(int n)
+{
+    int p = 1;
+    while(p < n) p <<= 1;
+    return p;
+}
+
+
 ComplexImage FFT2D(const ImageObject& img)
 {
     int W = img.width();
     int H = img.height();
 
-    ComplexImage F(W, H);
+    int newW = nextPow2(W);
+    int newH = nextPow2(H);
 
-    // Copy image to complex
-    for (int y = 0; y < H; y++)
-        for (int x = 0; x < W; x++)
+    ComplexImage F(newW, newH);
+
+    // zero initialize
+    for(int i = 0; i < newW * newH; i++)
+        F.data[i] = 0;
+
+    // copy original
+    for(int y = 0; y < H; y++)
+        for(int x = 0; x < W; x++)
             F(y,x) = Complex((double)img[y][x], 0.0);
 
-    // FFT on rows
-    for (int y = 0; y < H; y++) {
-        std::vector<Complex> row(W);
-        for (int x = 0; x < W; x++)
+    // FFT rows
+    for(int y = 0; y < newH; y++)
+    {
+        std::vector<Complex> row(newW);
+
+        for(int x = 0; x < newW; x++)
             row[x] = F(y,x);
 
         FFT1D(row, false);
 
-        for (int x = 0; x < W; x++)
+        for(int x = 0; x < newW; x++)
             F(y,x) = row[x];
     }
 
-    // FFT on columns
-    for (int x = 0; x < W; x++) {
-        std::vector<Complex> col(H);
-        for (int y = 0; y < H; y++)
+    // FFT columns
+    for(int x = 0; x < newW; x++)
+    {
+        std::vector<Complex> col(newH);
+
+        for(int y = 0; y < newH; y++)
             col[y] = F(y,x);
 
         FFT1D(col, false);
 
-        for (int y = 0; y < H; y++)
+        for(int y = 0; y < newH; y++)
             F(y,x) = col[y];
     }
 
@@ -448,71 +467,84 @@ void FFT1D(std::vector<Complex>& a, bool invert)
 void IFFT2D(const ComplexImage& F,
             ImageObject& img)
 {
-    int W = img.width();
-    int H = img.height();
+    int newW = F.width;
+    int newH = F.height;
 
     ComplexImage temp = F;
 
-    // Inverse FFT on rows
-    for (int y = 0; y < H; y++) {
-        std::vector<Complex> row(W);
-        for (int x = 0; x < W; x++)
+    // inverse rows
+    for(int y = 0; y < newH; y++)
+    {
+        std::vector<Complex> row(newW);
+        for(int x = 0; x < newW; x++)
             row[x] = temp(y,x);
 
         FFT1D(row, true);
 
-        for (int x = 0; x < W; x++)
+        for(int x = 0; x < newW; x++)
             temp(y,x) = row[x];
     }
 
-    // Inverse FFT on columns
-    for (int x = 0; x < W; x++) {
-        std::vector<Complex> col(H);
-        for (int y = 0; y < H; y++)
+    // inverse cols
+    for(int x = 0; x < newW; x++)
+    {
+        std::vector<Complex> col(newH);
+        for(int y = 0; y < newH; y++)
             col[y] = temp(y,x);
 
         FFT1D(col, true);
 
-        for (int y = 0; y < H; y++)
+        for(int y = 0; y < newH; y++)
             temp(y,x) = col[y];
     }
 
-    // Copy back to image
-    for (int y = 0; y < H; y++)
-        for (int x = 0; x < W; x++)
+    // crop to original size
+    int origW = img.width();
+    int origH = img.height();
+
+    for(int y = 0; y < origH; y++)
+        for(int x = 0; x < origW; x++)
             img[y][x] =
                 std::clamp(
-                    (int)std::abs(temp(y,x)),
+                    (int)std::real(temp(y,x)),
                     0,
                     (int)(img.levels()-1)
                 );
 }
 
 
-void InverseFilter(ImageObject& img,
-                   const Params& p)
+
+void InverseFilter(ImageObject& img, const Params& p)
 {
+    int origW = img.width();
+    int origH = img.height();
+
+    // 1️⃣ Center image
+    CenterImage(img);
+
+    // 2️⃣ FFT
     ComplexImage G = FFT2D(img);
 
-    int W = img.width();
-    int H = img.height();
+    int M = G.height;
+    int N = G.width;
 
-    for(int u=0;u<H;u++){
-        for(int v=0;v<W;v++){
+    double a = p.blurLength * cos(p.blurAngle * PI / 180.0);
+    double b = p.blurLength * sin(p.blurAngle * PI / 180.0);
 
-            double a = p.blurLength *
-                       cos(p.blurAngle*PI/180.0);
-            double b = p.blurLength *
-                       sin(p.blurAngle*PI/180.0);
+    // 3️⃣ Apply inverse filter using centered frequency coords
+    for(int u = 0; u < M; u++)
+    {
+        for(int v = 0; v < N; v++)
+        {
+            int uc = u - M/2;
+            int vc = v - N/2;
 
-            double val = PI*(u*a + v*b);
+            double val = PI * (uc * a + vc * b);
 
             Complex Huv;
 
             if(std::abs(val) > 1e-8)
-                Huv =
-                    (sin(val)/val) *
-                    std::exp(Complex(0,-val));
+                Huv = (sin(val)/val) * std::exp(Complex(0, -val));
             else
                 Huv = 1.0;
 
@@ -521,83 +553,109 @@ void InverseFilter(ImageObject& img,
         }
     }
 
+    // 4️⃣ IFFT
     IFFT2D(G, img);
+
+    // 5️⃣ Undo centering
+    CenterImage(img);
 }
 
-void WienerFilter(ImageObject& img,
-                  const Params& p)
-{
-    ComplexImage G = FFT2D(img);
 
+
+void CenterImage(ImageObject& img)
+{
     int W = img.width();
     int H = img.height();
 
-    for(int u=0;u<H;u++){
-        for(int v=0;v<W;v++){
+    for(int y = 0; y < H; y++)
+        for(int x = 0; x < W; x++)
+            if((x + y) % 2)
+                img[y][x] = - (int)img[y][x];
+}
 
-            double a = p.blurLength *
-                       cos(p.blurAngle*PI/180.0);
-            double b = p.blurLength *
-                       sin(p.blurAngle*PI/180.0);
 
-            double val = PI*(u*a + v*b);
+void WienerFilter(ImageObject& img, const Params& p)
+{
+    int origW = img.width();
+    int origH = img.height();
+
+    CenterImage(img);
+
+    ComplexImage G = FFT2D(img);
+
+    int M = G.height;
+    int N = G.width;
+
+    double a = p.blurLength * cos(p.blurAngle * PI / 180.0);
+    double b = p.blurLength * sin(p.blurAngle * PI / 180.0);
+
+    for(int u = 0; u < M; u++)
+    {
+        for(int v = 0; v < N; v++)
+        {
+            int uc = u - M/2;
+            int vc = v - N/2;
+
+            double val = PI * (uc * a + vc * b);
 
             Complex Huv;
 
             if(std::abs(val) > 1e-8)
-                Huv =
-                    (sin(val)/val) *
-                    std::exp(Complex(0,-val));
+                Huv = (sin(val)/val) * std::exp(Complex(0, -val));
             else
                 Huv = 1.0;
 
             Complex Hconj = std::conj(Huv);
+            double denom = std::norm(Huv) + p.wienerK;
 
-            double denom =
-                std::norm(Huv) + p.wienerK;
-
-            G(u,v) =
-                (Hconj / denom) * G(u,v);
+            G(u,v) = (Hconj / denom) * G(u,v);
         }
     }
 
     IFFT2D(G, img);
+
+    CenterImage(img);
 }
-void PeriodicFFT(ImageObject& img,
-                 const Params& p)
+
+void PeriodicFFT(ImageObject& img, const Params&)
 {
+    CenterImage(img);
+
     ComplexImage F = FFT2D(img);
 
-    int cx = img.width()/2;
-    int cy = img.height()/2;
+    int M = F.height;
+    int N = F.width;
 
-    // Example fixed notch positions
-    NotchReject(F, cx+30, cy, 10);
-    NotchReject(F, cx-30, cy, 10);
+    int cx = N / 2;
+    int cy = M / 2;
+
+    // Example symmetric notches
+    NotchReject(F, cx + 30, cy, 10);
+    NotchReject(F, cx - 30, cy, 10);
 
     IFFT2D(F, img);
+
+    CenterImage(img);
 }
 
-void NotchReject(ComplexImage& F,
-                 int cx,
-                 int cy,
-                 int radius)
+
+void NotchReject(ComplexImage& F, int cx, int cy, int radius)
 {
-    int W = F.width;
-    int H = F.height;
+    int M = F.height;
+    int N = F.width;
 
-    for(int u=0;u<H;u++){
-        for(int v=0;v<W;v++){
+    for(int u = 0; u < M; u++)
+    {
+        for(int v = 0; v < N; v++)
+        {
+            int du = u - cy;
+            int dv = v - cx;
 
-            int du = u-cy;
-            int dv = v-cx;
-
-            if(du*du + dv*dv < radius*radius)
+            if(du*du + dv*dv <= radius*radius)
                 F(u,v) = 0;
         }
     }
 }
-
 
 
 NoiseStats ComputeStatistics(const ImageObject& img)
